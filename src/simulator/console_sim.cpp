@@ -824,6 +824,16 @@ private:
         return StepResult::CommandBoundary;
     }
 
+    /* Advance the virtual clock to a stream's wake time, waiting for real
+     * when --real-time is requested. */
+    void advance_clock(Stream &stream) {
+        if (stream.ready_ms > now_ms_) {
+            if (options_.real_time)
+                std::this_thread::sleep_for(std::chrono::milliseconds(stream.ready_ms - now_ms_));
+            now_ms_ = stream.ready_ms;
+        }
+    }
+
     bool drain() {
         while (!ready_.empty()) {
             auto stream = ready_.top();
@@ -834,6 +844,7 @@ private:
                 now_ms_ = stream->ready_ms;
             }
             StepResult result = StepResult::Continue;
+            for (;;) {
             while (result == StepResult::Continue) {
                 if (stream->stack.empty()) { result = StepResult::Finished; break; }
                 Frame &frame = stream->stack.back();
@@ -857,13 +868,29 @@ private:
                 result = execute_instruction(*stream, ins);
             }
             if (result == StepResult::Failed || failed_) return false;
-            if (result == StepResult::CommandBoundary || result == StepResult::Sleep) {
-                if (++commands_executed_ > max_commands_) {
-                    std::cerr << "scmdsim: command budget exceeded (" << max_commands_ << "); probable alias/exec loop\n";
-                    failed_ = true;
-                    return false;
-                }
-                if (!stream->stack.empty()) ready_.push(std::move(stream));
+            if (result != StepResult::CommandBoundary && result != StepResult::Sleep) break;  // Finished
+            if (++commands_executed_ > max_commands_) {
+                std::cerr << "scmdsim: command budget exceeded (" << max_commands_ << "); probable alias/exec loop\n";
+                failed_ = true;
+                return false;
+            }
+            if (stream->stack.empty()) break;  // stream finished at a command boundary
+
+            /* Fast path: while this stream is still the queue head, run the
+             * next command in place instead of paying a priority-queue round
+             * trip. ready_ms never moves backwards, sleeps only move it
+             * forward, and this stream has the lowest id of anything submitted
+             * while it was running, so requeue+pop would immediately hand
+             * control straight back to it. Emulating that pop (clock advance
+             * included) keeps virtual time, ordering, and the command budget
+             * bit-for-bit identical. */
+            if (ready_.empty() || stream->ready_ms <= ready_.top()->ready_ms) {
+                advance_clock(*stream);
+                result = StepResult::Continue;
+                continue;
+            }
+            ready_.push(std::move(stream));
+            break;
             }
         }
         /* snd_opvar_set SetOnSpawn changes are observed one entity/SOS update
