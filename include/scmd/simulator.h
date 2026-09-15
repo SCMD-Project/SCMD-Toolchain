@@ -22,6 +22,7 @@ typedef struct ScmdSimOptions {
     bool trace;
     bool ansi_clear;
     bool engine_messages;
+    bool real_time;      /* sleep also waits real milliseconds (demo pacing) */
     uint64_t max_commands;
 } ScmdSimOptions;
 

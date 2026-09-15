@@ -28,6 +28,7 @@ void usage(const char *argv0) {
               << "  --trace                 trace SCB VM instructions to stderr\n"
               << "  --no-engine-messages    hide modeled CS2 engine messages\n"
               << "  --no-ansi               do not translate clear to terminal ANSI clear\n"
+              << "  --real-time             sleep also waits real milliseconds (demo pacing)\n"
               << "  --max-commands N        Console command budget (default 10000000)\n"
               << "  --profile " << SCMD_CS2_PROFILE << "    select the verified compatibility profile\n"
               << "  --help                  show this help\n"
@@ -69,6 +70,7 @@ int main(int argc, char **argv) {
     opts.trace = false;
     opts.ansi_clear = true;
     opts.engine_messages = true;
+    opts.real_time = false;
     opts.max_commands = 10000000ULL;
 
     bool input_seen = false;
@@ -109,6 +111,8 @@ int main(int argc, char **argv) {
             opts.engine_messages = false;
         } else if (std::strcmp(arg, "--no-ansi") == 0) {
             opts.ansi_clear = false;
+        } else if (std::strcmp(arg, "--real-time") == 0) {
+            opts.real_time = true;
         } else if (std::strcmp(arg, "--max-commands") == 0) {
             if (++i >= argc) { std::cerr << "error: --max-commands requires a number\n"; return 2; }
             if (!parse_u64("--max-commands", argv[i], opts.max_commands) || opts.max_commands == 0) return 2;
