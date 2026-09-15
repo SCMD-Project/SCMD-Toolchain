@@ -12,7 +12,7 @@ SCMD（Shortcut Command）是一门编译到 Source / Counter-Strike 2 Console C
 * `vcs16scmd`：vCS-16/2 -> SCMD AOT backend
 
 
-当前版本：`0.11.1`
+当前版本：`0.12.0`
 SCB ABI：`1`
 
 ## 构建
@@ -265,46 +265,37 @@ function 输出()
 
 [MIT License](LICENSE)
 
-### Demand-loaded static helper bundles
+## 0.12.0：共享加载、正确性和可诊断模拟
 
-The CS2 backend's mandatory function demand loading co-loads statically called helpers when they
-have no local storage. This prevents first-use `exec` diagnostics from being inserted midway
-through console UI output while preserving lazy loading for independent/stateful functions.
-The CS2 simulator models `[InputService] execing ...` for synchronous `exec`, so this behavior is
-covered by regression tests.
+普通函数拥有自己的 `__scmd_loadN` load-only 入口；依赖预装载只执行这个 guard，
+不复制 helper 的 alias 定义，也不运行 helper 的函数体。第一次调用时加载定义，
+然后调用真实 `__scmd_fnN`；以后直接走真实入口。显式 export 和有本地存储的函数仍保留边界。
 
-### CS2 Console compatibility guardrails
+`resident` 传播到静态直接调用的函数闭包，避免最后一次 clear 后为了私有 helper 再次 exec。
+**resident 不是 export**：从手写外部 CFG 调用的函数仍需要 export。
+编译输出新增 `<入口文件>.loadmap.tsv`，列出函数、eager/lazy、alias 数量、页数和预加载依赖。
 
-`scmdsim` intentionally follows observed CS2 Console behavior rather than adding shell features:
+修复两类真实误编译：数组超出 capacity 的高位下标不再回绕到低元素；
+优化后的返回目标重定向到保留名时，不再遗留已经删除的旧标签。
+运行时数组越界读为 0/false，越界写不改变数组；这在普通赋值和表达式中一致。
+导出名字限制为 31 字节，拒绝大小写冲突及大小写变体的原生命令名。
 
-- `|` is a literal argument, not a pipe operator.
-- synchronous `exec` emits the modeled `[InputService] execing ...` diagnostic unless engine messages are explicitly disabled for a test.
-- real CS2 builtins such as `help` and `kill` take precedence over same-name aliases in the simulator.
-- `export function` rejects public names reserved by CS2/SCMD (`help`, `kill`, `clear`, `clearall`, `hideconsole`, `showconsole`, etc.).
+模拟诊断示例：
 
-These rules exist specifically to prevent a CFG from passing in `scmdsim` while behaving differently in the game.
-
-### Resident functions and Console text semantics
-
-Functions that must never demand-load after a timing-sensitive boundary can be declared resident:
-
-```scmd
-resident function redraw_core()
-{
-    console.print("ready");
-}
-
-export resident function public_resident_entry()
-{
-    redraw_core();
-}
+```text
+scmdsim build --exec AliasOS --strict
+scmdsim build --exec AliasOS --strict --echo-delay-ms 7 --exec-latency-ms 1
 ```
 
-`resident function` bodies are emitted into the eager core. `export resident function` additionally exposes the stable public Console alias.
+交互中 `:loads [prefix]` 列出实际成功 exec 的模块和累计次数；`:stats` 包含未知命令、
+拒绝 alias 次数，以及压力参数。`--strict` 对未知命令、缺失 exec、非法 alias、
+读取 CFG/输入时的过长命令返回失败；`execifexists` 找不到仍可跳过。
+它不承诺识别全部游戏命令，第三方 CFG 的未建模命令也会失败。
 
-The simulator also models the real-CS2 UI distinction observed in-game:
+CFG 引号内反斜杠按字面量保留，不再偷偷进行 C 风格转义；关闭 Console 不丢弃 retained log。
+缓存键加入编译器版本，避免新 parser 错用旧 SCB 模块缓存。SCB ABI 仍为 1，但旧包不会自动改写
+旧 parser 已经编译进去的文本；升级后应从 CFG 重新 pack。
 
-- `echo text` renders as `[Console] text`.
-- `echoln text` renders raw text without the `[Console]` prefix.
-
-`console.print(...)` lowers to `echoln` and is the preferred API for terminal-style output.
+`echo` 延迟和 `exec` 延迟是可重复压力注入，默认都是 0，**不是对真实 CS2 帧调度的精确复刻**。
+模拟器不会增加任意字符串处理、pipe、con_filter 或游戏不存在的 API 来假装 AliasOS 成功。
+本轮实测与限制见 [RELEASE-0.12.0.md](RELEASE-0.12.0.md)。

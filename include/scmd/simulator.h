@@ -23,6 +23,10 @@ typedef struct ScmdSimOptions {
     bool ansi_clear;
     bool engine_messages;
     uint64_t max_commands;
+    /* Deterministic stress knobs, not measurements of real CS2 timings. */
+    uint64_t echo_delay_ms;
+    uint64_t exec_latency_ms;
+    bool strict; /* fail on unknown commands, missing execs and rejected aliases */
 } ScmdSimOptions;
 
 int scmd_simulator_run(const ScmdSimOptions *options);

@@ -244,7 +244,6 @@ std::vector<std::string> split_commands(std::string_view text) {
     std::string cur;
     cur.reserve(128);
     bool quote = false;
-    bool escape = false;
     bool comment = false;
     auto flush = [&]() {
         std::string s = trim(cur);
@@ -262,8 +261,6 @@ std::vector<std::string> split_commands(std::string_view text) {
             ++i;
             continue;
         }
-        if (escape) { cur.push_back(c); escape = false; continue; }
-        if (quote && c == '\\') { cur.push_back(c); escape = true; continue; }
         if (c == '"') { quote = !quote; cur.push_back(c); continue; }
         if (!quote && (c == ';' || c == '\n')) { flush(); continue; }
         if (c != '\r') cur.push_back(c);
@@ -284,12 +281,9 @@ std::vector<std::string> tokenize(std::string_view line) {
             while (i < line.size()) {
                 const char c = line[i++];
                 if (c == '"') break;
-                if (c == '\\' && i < line.size()) {
-                    const char n = line[i++];
-                    if (n == 'n') tok.push_back('\n');
-                    else if (n == 't') tok.push_back('\t');
-                    else tok.push_back(n);
-                } else tok.push_back(c);
+                // Console CFG is not a C string literal. Preserve backslashes;
+                // quotes delimit tokens rather than being escaped with \.
+                tok.push_back(c);
             }
         } else {
             while (i < line.size() && line[i] != ' ' && line[i] != '\t') tok.push_back(line[i++]);

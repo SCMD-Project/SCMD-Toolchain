@@ -20,6 +20,16 @@ static void nv_push(NameVec *v,const char *name){if(v->len==v->cap){size_t nc=v-
 static int nv_find(const NameVec *v,const char *name){for(size_t i=0;i<v->len;++i)if(strcmp(v->items[i],name)==0)return(int)i;return-1;}
 static const char *type_name(ScmdTypeKind t){return t==SCMD_TYPE_BOOL?"bool":(t==SCMD_TYPE_U8?"u8":"unknown");}
 
+static bool console_name_equal(const char *a, const char *b) {
+    for (; *a && *b; ++a, ++b) {
+        unsigned char x=(unsigned char)*a, y=(unsigned char)*b;
+        if(x>='A'&&x<='Z')x=(unsigned char)(x+('a'-'A'));
+        if(y>='A'&&y<='Z')y=(unsigned char)(y+('a'-'A'));
+        if(x!=y)return false;
+    }
+    return *a==*b;
+}
+
 static bool export_name_safe(const char *name){
     if(!name||!*name)return false;
     const unsigned char *p=(const unsigned char*)name;
@@ -32,7 +42,7 @@ static bool export_name_reserved(const char *name){
         "alias","clear","clearall","echo","echoln","exec","exec_async","execifexists","help",
         "hideconsole","showconsole","incrementvar","multvar","quit","exit","kill","version","say","say_team","setinfo","sleep","toggle"
     };
-    for(size_t i=0;i<sizeof(reserved)/sizeof(reserved[0]);++i)if(strcmp(name,reserved[i])==0)return true;
+    for(size_t i=0;i<sizeof(reserved)/sizeof(reserved[0]);++i)if(console_name_equal(name,reserved[i]))return true;
     return false;
 }
 
@@ -179,6 +189,12 @@ bool scmd_sema_check(const char *path,ScmdProgram *program){
         if(nv_find(&functions,f->name)>=0){scmd_error_at(path,f->line,f->col,"duplicate function '%s'",f->name);errors++;}
         else nv_push(&functions,f->name);
         if(f->exported){
+            if(strlen(f->name)>31u){scmd_error_at(path,f->line,f->col,"exported function name '%s' exceeds the 31-byte console alias limit",f->name);errors++;}
+            for(ScmdFunction *prev=program->functions;prev!=f;prev=prev->next){
+                if(prev->exported&&console_name_equal(prev->name,f->name)){
+                    scmd_error_at(path,f->line,f->col,"exported console name '%s' collides case-insensitively with '%s'",f->name,prev->name);errors++;break;
+                }
+            }
             if(!export_name_safe(f->name)){scmd_error_at(path,f->line,f->col,"exported function name '%s' must be an ASCII console identifier",f->name);errors++;}
             else if(export_name_reserved(f->name)){scmd_error_at(path,f->line,f->col,"exported function name '%s' collides with a CS2/SCMD builtin",f->name);errors++;}
         }

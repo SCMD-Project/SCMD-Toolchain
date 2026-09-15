@@ -29,7 +29,10 @@ void usage(const char *argv0) {
               << "  --no-engine-messages    hide modeled CS2 engine messages\n"
               << "  --no-ansi               do not translate clear to terminal ANSI clear\n"
               << "  --max-commands N        Console command budget (default 10000000)\n"
-              << "  --profile " << SCMD_CS2_PROFILE << "    select the verified compatibility profile\n"
+              << "  --strict                fail on modeled command/alias/exec errors\n"
+              << "  --echo-delay-ms N       delay echo (not echoln), virtual stress only\n"
+              << "  --exec-latency-ms N     add virtual latency to every exec, stress only\n"
+              << "  --profile " << SCMD_CS2_PROFILE << "    select the modeled compatibility profile\n"
               << "  --help                  show this help\n"
               << "  --version               print version\n\n"
               << "Interactive mode supports Tab completion. `exec`, `execifexists`, and\n"
@@ -112,6 +115,12 @@ int main(int argc, char **argv) {
         } else if (std::strcmp(arg, "--max-commands") == 0) {
             if (++i >= argc) { std::cerr << "error: --max-commands requires a number\n"; return 2; }
             if (!parse_u64("--max-commands", argv[i], opts.max_commands) || opts.max_commands == 0) return 2;
+        } else if (std::strcmp(arg, "--strict") == 0) {
+            opts.strict = true;
+        } else if (std::strcmp(arg, "--echo-delay-ms") == 0 || std::strcmp(arg, "--exec-latency-ms") == 0) {
+            if (++i >= argc) { std::cerr << "error: " << arg << " requires a number\n"; return 2; }
+            uint64_t &value = std::strcmp(arg, "--echo-delay-ms") == 0 ? opts.echo_delay_ms : opts.exec_latency_ms;
+            if (!parse_u64(arg, argv[i], value)) return 2;
         } else if (std::strcmp(arg, "--profile") == 0) {
             if (++i >= argc) { std::cerr << "error: --profile requires a name\n"; return 2; }
             if (std::strcmp(argv[i], SCMD_CS2_PROFILE) != 0) {

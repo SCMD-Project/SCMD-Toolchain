@@ -1,0 +1,28 @@
+// Every u8 index, including high-bit out-of-range values. Generated fixture.
+u8 values[1] = 0;
+bool flags[1] = false;
+volatile u8 i = 0;
+function main() {
+ u8 value = 0; u8 expected = 0; bool flag = false; u8 j = 0;
+ while(true) {
+  if(i < 1) { expected = i ^ 165; } else { expected = 0; }
+  values[i] = i ^ 165; flags[i] = true;
+  value = values[i]; flag = flags[i];
+  if(value != expected || flag != (i < 1)) { console.print("ARRAY_BOUNDS_FAIL_DIRECT"); return; }
+  value = values[i] ^ 83;
+  if(value != (expected ^ 83) || (!flags[i]) != !(i < 1)) { console.print("ARRAY_BOUNDS_FAIL_EXPR"); return; }
+  j = i; j = values[j];
+  if(j != expected) { console.print("ARRAY_BOUNDS_FAIL_SELF_INDEX"); return; }
+  if(i == 255) { break_marker(); return; }
+  i += 1;
+ }
+}
+function break_marker() {
+ // OOB writes above must not have corrupted low elements.
+ u8 k = 0;
+ while(true) {
+  if(values[k] != (k ^ 165)) { console.print("ARRAY_BOUNDS_FAIL_WRAP_STORE"); return; }
+  if(k == 0) { console.print("ARRAY_BOUNDS_PASS"); return; }
+  k += 1;
+ }
+}

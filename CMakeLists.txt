@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(scmdc VERSION 0.11.1 LANGUAGES C CXX)
+project(scmdc VERSION 0.12.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -786,4 +786,34 @@ if(BUILD_TESTING)
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_array_compound_rejected.cmake
     )
 
+endif()
+
+if(BUILD_TESTING)
+    foreach(n 1 3 4 64 255 256)
+        add_test(NAME scmd_array_bounds_${n}
+            COMMAND ${CMAKE_COMMAND} -DSCMDC=$<TARGET_FILE:scmdc> -DSCMDSIM=$<TARGET_FILE:scmdsim>
+                -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/array_bounds_${n}.scmd
+                -DOUTDIR=${CMAKE_CURRENT_BINARY_DIR}/array-bounds-${n} -DEXPECT=ARRAY_BOUNDS_PASS
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_compiled_both.cmake)
+        set_tests_properties(scmd_array_bounds_${n} PROPERTIES TIMEOUT 60)
+    endforeach()
+endif()
+
+if(BUILD_TESTING)
+    add_test(NAME scmd_lazy_shared_load_once
+        COMMAND ${CMAKE_COMMAND} -DSCMDC=$<TARGET_FILE:scmdc> -DSCMDSIM=$<TARGET_FILE:scmdsim>
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/lazy_shared.scmd
+            -DOUTDIR=${CMAKE_CURRENT_BINARY_DIR}/lazy-shared
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_lazy_shared.cmake)
+    add_test(NAME scmdsim_fidelity_stress
+        COMMAND ${CMAKE_COMMAND} -DSCMDSIM=$<TARGET_FILE:scmdsim>
+            -DOUTDIR=${CMAKE_CURRENT_BINARY_DIR}/sim-fidelity
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_sim_fidelity.cmake)
+endif()
+
+if(BUILD_TESTING)
+    add_test(NAME scmd_export_console_names
+        COMMAND ${CMAKE_COMMAND} -DSCMDC=$<TARGET_FILE:scmdc>
+            -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/tests -DOUTDIR=${CMAKE_CURRENT_BINARY_DIR}/export-console-names
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_export_names.cmake)
 endif()

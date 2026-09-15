@@ -223,8 +223,8 @@ public:
                 std::cerr << "exec: couldn't exec '" << ref << "'\n";
                 return 1;
             }
-            ++exec_calls_;
-            submit_block(block, false);
+            note_exec(ref);
+            submit_block(block, false, options_.exec_latency_ms);
             if (!drain()) return 1;
         }
         if (options_.script_path && *options_.script_path) {
@@ -268,6 +268,20 @@ private:
     uint64_t alias_generation_ = 0;
     uint64_t completion_alias_generation_ = (std::numeric_limits<uint64_t>::max)();
     std::vector<std::string> completion_aliases_;
+    struct DelayedLine {
+        uint64_t at, order;
+        std::string text;
+    };
+    struct LineLater {
+        bool operator()(const DelayedLine &a, const DelayedLine &b) const {
+            return a.at != b.at ? a.at > b.at : a.order > b.order;
+        }
+    };
+    std::priority_queue<DelayedLine, std::vector<DelayedLine>, LineLater> delayed_lines_;
+    uint64_t next_line_id_ = 0;
+    uint64_t unknown_commands_ = 0;
+    uint64_t rejected_aliases_ = 0;
+    std::unordered_map<std::string, uint64_t> module_loads_;
     bool console_visible_ = true;
     std::vector<std::string> screen_lines_;
     std::string screen_partial_;
@@ -415,6 +429,7 @@ private:
         std::ostringstream ss;
         ss << f.rdbuf();
         const std::string text = ss.str();
+        if (!validate_text(text, display)) return (std::numeric_limits<uint32_t>::max)();
         const auto begin = std::chrono::steady_clock::now();
         std::string error;
 
@@ -438,7 +453,7 @@ private:
 
         fs::path cache_path;
         if (options_.use_cache) {
-            const uint64_t hash = fnv1a64_text(key, text);
+            const uint64_t hash = fnv1a64_text(std::string(SCMD_VERSION) + ":" + key, text);
             cache_path = cache_root_ / "modules" / (hex64(hash) + ".scb");
             if (fs::is_regular_file(cache_path, ec) && !ec) {
                 if (module.load(cache_path, error) && module.find_module(key) != (std::numeric_limits<uint32_t>::max)()) {
@@ -503,11 +518,11 @@ private:
     }
 
     void screen_write(const std::string &text, bool newline) {
-        if (!console_visible_) return;
-        std::cout << text;
+        // Closing the console hides the view, not its retained log.
+        if (console_visible_) std::cout << text;
         screen_partial_ += text;
         if (newline) {
-            std::cout << '\n';
+            if (console_visible_) std::cout << '\n';
             screen_lines_.push_back(screen_partial_);
             screen_partial_.clear();
             if (screen_lines_.size() > 512u) screen_lines_.erase(screen_lines_.begin(), screen_lines_.begin() + 256);
@@ -532,6 +547,46 @@ private:
                n == "cl_sos_test_set_opvar" || n == "cl_sos_test_get_opvar" || n.rfind("snd_sos_", 0) == 0;
     }
 
+    bool validate_text(std::string_view text, std::string_view origin) {
+        if (!options_.strict) return true;
+        for (const std::string &command : scmd::bc::split_commands(text)) {
+            if (command.size() > SCMD_CS2_MAX_COMMAND_BYTES) {
+                std::cerr << "scmdsim: overlong command (" << command.size() << " bytes) in " << origin << '\n';
+                failed_ = true;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool valid_alias_name(const std::string &name) {
+        if (name.empty() || name.size() > 31u) {
+            std::cerr << "alias: name must contain 1..31 bytes: '" << name << "'\n";
+        } else if (is_builtin(name) || cvars_.find(name) != cvars_.end()) {
+            std::cerr << "alias: cannot shadow built-in command or cvar '" << name << "'\n";
+        } else {
+            return true;
+        }
+        ++rejected_aliases_;
+        if (options_.strict) failed_ = true;
+        return false;
+    }
+
+    void note_exec(std::string_view ref) {
+        ++exec_calls_;
+        ++module_loads_[scmd::bc::normalize_exec_ref(std::string(ref))];
+    }
+
+    bool time_after(uint64_t delay, uint64_t &result) {
+        if (delay > (std::numeric_limits<uint64_t>::max)() - now_ms_) {
+            std::cerr << "scmdsim: virtual time overflow\n";
+            failed_ = true;
+            return false;
+        }
+        result = now_ms_ + delay;
+        return true;
+    }
+
     const std::string &reg_string(const Stream &stream, uint8_t reg) const {
         const uint64_t raw = stream.regs[reg];
         if (raw >= package_.strings.size()) throw std::runtime_error("VM register contains invalid string id");
@@ -553,15 +608,16 @@ private:
         return true;
     }
 
-    void submit_block(uint32_t block_id, bool async = false) {
+    void submit_block(uint32_t block_id, bool async = false, uint64_t delay = 0) {
         auto stream = std::make_shared<Stream>();
         stream->id = next_stream_id_++;
-        stream->ready_ms = now_ms_;
+        if (!time_after(delay, stream->ready_ms)) return;
         stream->async = async;
         if (push_block(*stream, block_id)) ready_.push(std::move(stream));
     }
 
     void submit_console(std::string_view text) {
+        if (!validate_text(text, "<interactive>")) return;
         const uint32_t block = package_.compile_text(text, "<interactive>");
         submit_block(block, false);
     }
@@ -578,7 +634,10 @@ private:
     }
 
     bool report_exec_missing(std::string_view ref, bool report) {
-        if (report) std::cerr << "exec: couldn't exec '" << ref << "'\n";
+        if (report) {
+            std::cerr << "exec: couldn't exec '" << ref << "'\n";
+            if (options_.strict) failed_ = true;
+        }
         return false;
     }
 
@@ -617,9 +676,7 @@ private:
         }
         case Op::AliasSet: {
             const std::string name = lower_ascii(reg_string(stream, ins.a));
-            if (is_builtin(name)) {
-                std::cerr << "alias: cannot shadow built-in command '" << name << "'\n";
-            } else {
+            if (valid_alias_name(name)) {
                 aliases_[name] = Alias{ins.x, ins.y};
                 ++alias_generation_;
             }
@@ -627,9 +684,7 @@ private:
         }
         case Op::AliasSetI: {
             const std::string name = lower_ascii(package_.str(ins.x));
-            if (is_builtin(name)) {
-                std::cerr << "alias: cannot shadow built-in command '" << name << "'\n";
-            } else {
+            if (valid_alias_name(name)) {
                 aliases_[name] = Alias{ins.y, ins.z};
                 ++alias_generation_;
             }
@@ -645,7 +700,10 @@ private:
             const std::string ref = immediate ? package_.str(ins.x) : reg_string(stream, ins.a);
             const bool report = op != Op::ExecIfExists && op != Op::ExecIfExistsI;
             if (!safe_exec_ref(ref)) {
-                if (report) std::cerr << "exec: invalid cfg path '" << ref << "'\n";
+                if (report) {
+                    std::cerr << "exec: invalid cfg path '" << ref << "'\n";
+                    if (options_.strict) failed_ = true;
+                }
                 return StepResult::CommandBoundary;
             }
             const uint32_t block = resolve_module(ref);
@@ -653,13 +711,15 @@ private:
                 (void)report_exec_missing(ref, report);
                 return StepResult::CommandBoundary;
             }
-            ++exec_calls_;
+            note_exec(ref);
             if (op == Op::ExecAsync || op == Op::ExecAsyncI) {
-                if (options_.engine_messages && console_visible_) engine_line("[InputService] queuing " + ref + " for async execution");
-                submit_block(block, true);
+                if (options_.engine_messages) engine_line("[InputService] queuing " + ref + " for async execution");
+                submit_block(block, true, options_.exec_latency_ms);
             } else {
-                if (options_.engine_messages && console_visible_) engine_line("[InputService] execing " + ref);
+                if (options_.engine_messages) engine_line("[InputService] execing " + ref);
                 if (!push_block(stream, block)) return StepResult::Failed;
+                if (!time_after(options_.exec_latency_ms, stream.ready_ms)) return StepResult::Failed;
+                if (options_.exec_latency_ms) return StepResult::Sleep;
             }
             return StepResult::CommandBoundary;
         }
@@ -685,10 +745,14 @@ private:
         case Op::EchoI:
         case Op::EchoLnI: {
             const std::string &text = (op == Op::EchoI || op == Op::EchoLnI) ? package_.str(ins.x) : reg_string(stream, ins.a);
-            if (console_visible_) {
-                if (op == Op::Echo || op == Op::EchoI) screen_line(std::string("[Console] ") + text);
-                else screen_line(text);
-            }
+            if (op == Op::Echo || op == Op::EchoI) {
+                const std::string line = std::string("[Console] ") + text;
+                if (options_.echo_delay_ms) {
+                    uint64_t at;
+                    if (!time_after(options_.echo_delay_ms, at)) return StepResult::Failed;
+                    delayed_lines_.push(DelayedLine{at, next_line_id_++, line});
+                } else screen_line(line);
+            } else screen_line(text);
             return StepResult::CommandBoundary;
         }
         case Op::Say:
@@ -803,12 +867,21 @@ private:
             if (!push_block(stream, alias->second.block)) return StepResult::Failed;
             return StepResult::CommandBoundary;
         }
-        if (console_visible_) screen_line("Unknown command: " + argv[0]);
+        screen_line("Unknown command: " + argv[0]);
+        ++unknown_commands_;
+        if (options_.strict) { failed_ = true; return StepResult::Failed; }
         return StepResult::CommandBoundary;
     }
 
     bool drain() {
-        while (!ready_.empty()) {
+        while (!ready_.empty() || !delayed_lines_.empty()) {
+            if (!delayed_lines_.empty() && (ready_.empty() || delayed_lines_.top().at < ready_.top()->ready_ms)) {
+                const DelayedLine line = delayed_lines_.top();
+                delayed_lines_.pop();
+                now_ms_ = std::max(now_ms_, line.at);
+                screen_line(line.text);
+                continue;
+            }
             auto stream = ready_.top();
             ready_.pop();
             if (stream->ready_ms > now_ms_) now_ms_ = stream->ready_ms;
@@ -936,7 +1009,10 @@ private:
                       << " modules=" << package_.modules.size() << " blocks=" << package_.blocks.size()
                       << " strings=" << package_.strings.size() << " execs=" << exec_calls_
                       << " alias_calls=" << alias_calls_ << " lazy_compiles=" << lazy_compiles_
-                      << " cache_hits=" << cache_hits_ << " cache_misses=" << cache_misses_ << '\n';
+                      << " cache_hits=" << cache_hits_ << " cache_misses=" << cache_misses_
+                      << " unique_execs=" << module_loads_.size() << " unknown_commands=" << unknown_commands_
+                      << " rejected_aliases=" << rejected_aliases_
+                      << " echo_delay_ms=" << options_.echo_delay_ms << " exec_latency_ms=" << options_.exec_latency_ms << '\n';
         } else if (cmd == "time") {
             std::cout << now_ms_ << " ms\n";
         } else if (cmd == "cvars") {
@@ -950,6 +1026,12 @@ private:
             for (const auto &kv : aliases_) if (kv.first.rfind(prefix, 0) == 0) names.push_back(kv.first);
             std::sort(names.begin(), names.end());
             for (const auto &name : names) std::cout << name << " = " << package_.str(aliases_.at(name).body_sid) << '\n';
+        } else if (cmd == "loads") {
+            const std::string prefix = argv.size() > 1u ? scmd::bc::normalize_exec_ref(argv[1]) : "";
+            std::vector<std::string> names;
+            for (const auto &kv : module_loads_) if (kv.first.rfind(prefix, 0) == 0) names.push_back(kv.first);
+            std::sort(names.begin(), names.end());
+            for (const auto &name : names) std::cout << module_loads_.at(name) << "\t" << name << '\n';
         } else if (cmd == "modules" || cmd == "execs") {
             const std::string prefix = argv.size() > 1u ? argv[1] : "";
             const auto items = complete_exec_dynamic(prefix);
@@ -977,7 +1059,7 @@ private:
             for (size_t i = start; i < screen_lines_.size(); ++i) std::cout << screen_lines_[i] << '\n';
             if (!screen_partial_.empty()) std::cout << screen_partial_ << '\n';
         } else if (cmd == "help") {
-            std::cout << ":stats  :time  :screen [lines]  :aliases [prefix]  :cvars  :modules [prefix]  :complete <line>\n"
+            std::cout << ":stats  :loads [prefix]  :time  :screen [lines]  :aliases [prefix]  :cvars  :modules [prefix]  :complete <line>\n"
                       << ":precompile  :cache  :quit\n";
         } else if (cmd != "quit" && cmd != "q" && cmd != "exit") {
             std::cout << "Unknown simulator meta-command: :" << argv[0] << '\n';

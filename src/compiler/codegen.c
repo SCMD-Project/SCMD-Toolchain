@@ -41,6 +41,7 @@ typedef struct CGArray {
 
 typedef struct CGFunction {
     const ScmdFunction *ast;
+    bool eager; /* transitive resident closure, not the main call graph */
     char *entry_alias,*ret_alias;
     CGVar *locals; size_t local_count;
 } CGFunction;
@@ -217,13 +218,21 @@ static BExpr *vec_lt(BVec a,BVec b){BExpr*eq=bc(true),*lt=bc(false);for(int i=7;
 static BVec vec_mux(BExpr *cond,BVec t,BVec f){BVec r;for(int i=0;i<8;++i)r.b[i]=bor(band(cond,t.b[i]),band(bnot(cond),f.b[i]));return r;}
 static BVec vec_shift_dynamic(BVec a,BVec sh,bool left){BVec cur=a;const unsigned steps[3]={1u,2u,4u};for(int k=0;k<3;++k){BVec shifted=vec_shift_const(cur,steps[k],left);cur=vec_mux(sh.b[k],shifted,cur);}BExpr*high=bc(false);for(int i=3;i<8;++i)high=bor(high,sh.b[i]);return vec_mux(high,vec_const(0),cur);}
 
+/* The balanced selector consumes only log2(capacity) low bits. Reject the
+ * remaining bits explicitly; otherwise e.g. a[4] aliases a[0] for a[4]. */
+static BExpr *array_index_high_bits(BVec index, unsigned first) {
+    BExpr *high = bc(false);
+    for (unsigned i = first; i < 8u; ++i) high = bor(high, index.b[i]);
+    return high;
+}
+
 static BVec array_select_u8(CGArray *a,BVec index){
     size_t cap=1u;while(cap<a->len)cap*=2u;
     BVec *work=(BVec*)malloc(cap*sizeof(*work));
     for(size_t i=0;i<cap;++i)work[i]=i<a->len?vec_var(&a->elems[i]):vec_const(0);
     size_t n=cap;unsigned bit=0;
     while(n>1u){for(size_t i=0;i<n/2u;++i)work[i]=vec_mux(index.b[bit],work[i*2u+1u],work[i*2u]);n/=2u;bit++;}
-    BVec r=work[0];free(work);return r;
+    BVec r=work[0];free(work);return vec_mux(array_index_high_bits(index,bit),vec_const(0),r);
 }
 static BExpr *array_select_bool(CGArray *a,BVec index){
     size_t cap=1u;while(cap<a->len)cap*=2u;
@@ -231,7 +240,7 @@ static BExpr *array_select_bool(CGArray *a,BVec index){
     for(size_t i=0;i<cap;++i)work[i]=i<a->len?ba(a->elems[i].bit[0]):bc(false);
     size_t n=cap;unsigned bit=0;
     while(n>1u){for(size_t i=0;i<n/2u;++i){BExpr*sel=index.b[bit];work[i]=bor(band(sel,work[i*2u+1u]),band(bnot(sel),work[i*2u]));}n/=2u;bit++;}
-    BExpr*r=work[0];free(work);return r;
+    BExpr*r=work[0];free(work);return band(bnot(array_index_high_bits(index,bit)),r);
 }
 
 
@@ -640,7 +649,7 @@ static char *compile_array_load_to_var(Codegen *cg,CGFunction *fn,CGVar *dst,CGA
     if(!a||!dst||a->type!=dst->type)return scmd_strdup(next);
     uint8_t ci=0;
     if(eval_const_u8(index_expr,&ci)){
-        if(ci>=a->len)return scmd_strdup(next);
+        if(ci>=a->len)return dst->type==SCMD_TYPE_BOOL?compile_set_bit(cg,bc(false),dst->bit[0],next):compile_assign_u8_const(cg,dst,0u,next);
         if(dst->type==SCMD_TYPE_BOOL)return compile_set_bit(cg,ba(a->elems[ci].bit[0]),dst->bit[0],next);
         return compile_assign_u8_bvec_direct(cg,dst,vec_var(&a->elems[ci]),next);
     }
@@ -663,7 +672,10 @@ static char *compile_array_load_to_var(Codegen *cg,CGFunction *fn,CGVar *dst,CGA
         }
         n/=2u;bit++;
     }
-    char *r=work[0];free(work);return r;
+    char *r=work[0];free(work);
+    char *zero=dst->type==SCMD_TYPE_BOOL?compile_set_bit(cg,bc(false),dst->bit[0],next):compile_assign_u8_const(cg,dst,0u,next);
+    char *checked=compile_bexpr(cg,array_index_high_bits(index,bit),zero,r);
+    free(zero);free(r);return checked;
 }
 
 static char *compile_assign_var(Codegen *cg,CGFunction *fn,CGVar *v,const ScmdExpr *expr,const char *next){
@@ -755,7 +767,9 @@ static char *compile_array_assign(Codegen *cg,CGFunction *fn,CGArray *a,const Sc
     for(size_t i=0;i<cap;++i)work[i]=i<a->len?compile_assign_var(cg,fn,&a->elems[i],rhs,next):scmd_strdup(next);
     size_t n=cap;unsigned bit=0;
     while(n>1u){for(size_t i=0;i<n/2u;++i){char*entry=compile_bexpr(cg,index.b[bit],work[i*2u+1u],work[i*2u]);free(work[i*2u]);free(work[i*2u+1u]);work[i]=entry;}n/=2u;bit++;}
-    char*r=work[0];free(work);return r;
+    char*r=work[0];free(work);
+    char*checked=compile_bexpr(cg,array_index_high_bits(index,bit),next,r);
+    free(r);return checked;
 }
 
 static bool unsafe_alias_body_text(const char*s){for(;*s;++s)if(*s=='"'||*s=='\n'||*s=='\r')return true;return false;}
@@ -828,7 +842,7 @@ static bool const_array_init(Codegen*cg,const ScmdGlobal*g,CGArray*a){
 
 
 typedef struct CfgOptSlot { const char *key; size_t index; } CfgOptSlot;
-typedef struct CfgOptMap { CfgOptSlot *slots; size_t cap; } CfgOptMap;
+typedef struct CfgOptMap { CfgOptSlot *slots; size_t cap; const AliasVec *defs; } CfgOptMap;
 typedef struct CfgOptRefScan {
     const CfgOptMap *map;
     const size_t *redirect;
@@ -856,7 +870,7 @@ static const char *cfg_opt_word_end(const char *p,const char *end){while(p<end&&
 static bool cfg_opt_word_is(const char *p,const char *end,const char *word){size_t n=strlen(word);return (size_t)(end-p)==n&&memcmp(p,word,n)==0;}
 static bool cfg_opt_passthrough(const char *p,const char *end){return cfg_opt_word_is(p,end,"echoln")||cfg_opt_word_is(p,end,"say")||cfg_opt_word_is(p,end,"say_team")||cfg_opt_word_is(p,end,"exec_async")||cfg_opt_word_is(p,end,"exec")||cfg_opt_word_is(p,end,"sleep")||cfg_opt_word_is(p,end,"clear");}
 
-static bool cfg_opt_map_init(CfgOptMap *m,const AliasVec *defs){size_t cap=1,need=defs->len>=(size_t)-1/2?(size_t)-1:defs->len*2u+1u;while(cap<need){if(cap>(size_t)-1/2)return false;cap*=2u;}m->slots=(CfgOptSlot*)calloc(cap,sizeof(*m->slots));if(!m->slots)return false;m->cap=cap;for(size_t i=0;i<defs->len;++i){size_t pos=cfg_opt_hash(defs->items[i].name)&(cap-1u);while(m->slots[pos].key&&strcmp(m->slots[pos].key,defs->items[i].name)!=0)pos=(pos+1u)&(cap-1u);m->slots[pos].key=defs->items[i].name;m->slots[pos].index=i;}return true;}
+static bool cfg_opt_map_init(CfgOptMap *m,const AliasVec *defs){m->defs=defs;size_t cap=1,need=defs->len>=(size_t)-1/2?(size_t)-1:defs->len*2u+1u;while(cap<need){if(cap>(size_t)-1/2)return false;cap*=2u;}m->slots=(CfgOptSlot*)calloc(cap,sizeof(*m->slots));if(!m->slots)return false;m->cap=cap;for(size_t i=0;i<defs->len;++i){size_t pos=cfg_opt_hash(defs->items[i].name)&(cap-1u);while(m->slots[pos].key&&strcmp(m->slots[pos].key,defs->items[i].name)!=0)pos=(pos+1u)&(cap-1u);m->slots[pos].key=defs->items[i].name;m->slots[pos].index=i;}return true;}
 static void cfg_opt_map_dispose(CfgOptMap *m){free(m->slots);m->slots=NULL;m->cap=0;}
 static bool cfg_opt_map_find_span(const CfgOptMap *m,const char *s,size_t n,size_t *out){if(!m||!m->slots||!m->cap)return false;size_t pos=cfg_opt_hash_span(s,n)&(m->cap-1u);for(;;){const char *key=m->slots[pos].key;if(!key)return false;if(strlen(key)==n&&memcmp(key,s,n)==0){if(out)*out=m->slots[pos].index;return true;}pos=(pos+1u)&(m->cap-1u);}}
 static size_t cfg_opt_redirect(const size_t *redirect,size_t count,size_t index){if(!redirect||index>=count)return index;for(size_t i=0;i<count;++i){size_t next=redirect[index];if(next==CFG_OPT_NONE||next>=count)return index;if(next==index)return index;index=next;}return index;}
@@ -905,7 +919,7 @@ static _Thread_local const AliasDef *cfg_opt_reserved_items=NULL;
 static _Thread_local size_t cfg_opt_reserved_len=0;
 static bool cfg_opt_name_reserved(const AliasVec *defs,const char *candidate){if(cfg_opt_reserved_items!=defs->items||cfg_opt_reserved_len!=defs->len){cfg_opt_token_set_dispose(&cfg_opt_reserved_cache);cfg_opt_reserved_items=defs->items;cfg_opt_reserved_len=defs->len;if(!cfg_opt_token_set_build(&cfg_opt_reserved_cache,defs))return false;}if(!cfg_opt_reserved_cache.cap)return false;if(cfg_opt_token_set_has(&cfg_opt_reserved_cache,candidate))return true;cfg_opt_token_set_add(&cfg_opt_reserved_cache,candidate,strlen(candidate));return false;}
 static bool cfg_opt_buf_append(CfgOptBuf *b,const char *s,size_t n){if(n>(size_t)-1-b->len-1u)return false;size_t need=b->len+n+1u;if(need>b->cap){size_t cap=b->cap?b->cap:128u;while(cap<need){if(cap>(size_t)-1/2)return false;cap*=2u;}char *p=(char*)realloc(b->data,cap);if(!p)return false;b->data=p;b->cap=cap;}memcpy(b->data+b->len,s,n);b->len+=n;b->data[b->len]='\0';return true;}
-static bool cfg_opt_buf_append_word(CfgOptBuf *b,const char *start,const char *end,const CfgOptMap *map,const size_t *redirect,const char *const *rename,size_t count){size_t index;if(cfg_opt_map_find_span(map,start,(size_t)(end-start),&index)){index=cfg_opt_redirect(redirect,count,index);if(rename[index])return cfg_opt_buf_append(b,rename[index],strlen(rename[index]));}return cfg_opt_buf_append(b,start,(size_t)(end-start));}
+static bool cfg_opt_buf_append_word(CfgOptBuf *b,const char *start,const char *end,const CfgOptMap *map,const size_t *redirect,const char *const *rename,size_t count){size_t index;if(cfg_opt_map_find_span(map,start,(size_t)(end-start),&index)){index=cfg_opt_redirect(redirect,count,index);const char *name=rename[index]?rename[index]:map->defs->items[index].name;return cfg_opt_buf_append(b,name,strlen(name));}return cfg_opt_buf_append(b,start,(size_t)(end-start));}
 static char *cfg_opt_rewrite_opaque_body(const AliasDef *def,const CfgOptMap *map,const size_t *redirect,const char *const *rename,size_t count){const char *start,*end;if(!cfg_opt_last_token(def->body,&start,&end))return scmd_strdup(def->body);CfgOptBuf out={0};if(!cfg_opt_buf_append(&out,def->body,(size_t)(start-def->body))||!cfg_opt_buf_append_word(&out,start,end,map,redirect,rename,count)||!cfg_opt_buf_append(&out,end,strlen(end)))goto fail;return out.data;fail:free(out.data);return NULL;}
 static char *cfg_opt_rewrite_body(const AliasDef *def,const CfgOptMap *map,const size_t *redirect,const char *const *rename,size_t count){if(def->opaque)return cfg_opt_rewrite_opaque_body(def,map,redirect,rename,count);if(!def->body[0])return scmd_strdup(def->body);CfgOptBuf out={0};const char *body=def->body,*last=body+strlen(body),*seg=body;while(seg<last){const char *end=(const char*)memchr(seg,';', (size_t)(last-seg));if(!end)end=last;const char *p=cfg_opt_skip_space(seg,end),*q=cfg_opt_word_end(p,end);if(cfg_opt_word_is(p,q,"alias")){if(!cfg_opt_buf_append(&out,seg,(size_t)(p-seg))||!cfg_opt_buf_append(&out,p,(size_t)(q-p)))goto fail;const char *a=cfg_opt_skip_space(q,end);if(!cfg_opt_buf_append(&out,q,(size_t)(a-q)))goto fail;const char *ae=cfg_opt_word_end(a,end);if(!cfg_opt_buf_append_word(&out,a,ae,map,redirect,rename,count))goto fail;const char *v=cfg_opt_skip_space(ae,end);if(!cfg_opt_buf_append(&out,ae,(size_t)(v-ae)))goto fail;const char *ve=cfg_opt_word_end(v,end);if(!cfg_opt_buf_append_word(&out,v,ve,map,redirect,rename,count)||!cfg_opt_buf_append(&out,ve,(size_t)(end-ve)))goto fail;}else if(p<q&&!cfg_opt_passthrough(p,q)){if(!cfg_opt_buf_append(&out,seg,(size_t)(p-seg))||!cfg_opt_buf_append_word(&out,p,q,map,redirect,rename,count)||!cfg_opt_buf_append(&out,q,(size_t)(end-q)))goto fail;}else if(!cfg_opt_buf_append(&out,seg,(size_t)(end-seg)))goto fail;if(end<last&&!cfg_opt_buf_append(&out,";",1u))goto fail;if(end==last)break;seg=end+1u;}return out.data;fail:free(out.data);return NULL;}
 
@@ -937,17 +951,12 @@ static char *lazy_page_ref(Codegen *cg,size_t fi,size_t page){if(cg->options.exe
 static char *lazy_entry_ref(Codegen *cg,size_t fi){return lazy_page_ref(cg,fi,0);}
 static void remove_stale_lazy_pages(Codegen *cg,size_t fi,size_t first_unused){for(size_t id=first_unused;id<1000000u;++id){char *path=lazy_page_path(cg,fi,id);int rc=path?remove(path):-1;free(path);if(rc!=0)break;}}
 static bool function_is_main(const CGFunction *f){return f&&f->ast&&strcmp(f->ast->name,"main")==0;}
-static bool function_is_eager(const CGFunction *f){return function_is_main(f)||(f&&f->ast&&f->ast->resident);}
+static bool function_is_eager(const CGFunction *f){return function_is_main(f)||(f&&f->ast&&(f->ast->resident||f->eager));}
 
-/* Per-function demand loading used to be too fine-grained: a menu function
- * could start printing, call a tiny row/helper function, and CS2 would emit an
- * [InputService] execing ... line in the middle of the screen while that helper
- * was loaded.  Co-load statically-called helpers that have no local storage.
- *
- * Stateless helpers are safe to duplicate across lazy modules: their generated
- * aliases are immutable control/dataflow definitions, while return slots and
- * global state live in the eager core.  Stateful callees remain independent
- * modules so loading another caller can never reset their local variables. */
+/* Direct-call graph used to preload private stateless helpers. Implementations
+ * are emitted once, in their own module. A load-only guard is separate from the
+ * callable entry: loading a helper must never call it or overwrite its return
+ * slot. Exported/stateful functions remain demand boundaries. */
 static void lazy_scan_direct_calls(Codegen *cg,const ScmdStmt *s,bool *marks){
     for(;s;s=s->next){
         if(s->kind==STMT_CALL){
@@ -968,35 +977,163 @@ static void lazy_scan_direct_calls(Codegen *cg,const ScmdStmt *s,bool *marks){
     }
 }
 
-static bool lazy_bundle_mark(Codegen *cg,size_t fi,bool *bundle){
-    if(fi>=cg->function_count||bundle[fi])return true;
-    bundle[fi]=true;
-    bool *direct=(bool*)calloc(cg->function_count,sizeof(*direct));
-    if(!direct)return false;
-    lazy_scan_direct_calls(cg,cg->functions[fi].ast->body,direct);
-    for(size_t dep=0;dep<cg->function_count;++dep){
-        if(!direct[dep]||dep==fi||function_is_eager(&cg->functions[dep])||cg->functions[dep].ast->exported)continue;
-        if(cg->functions[dep].local_count==0&&!lazy_bundle_mark(cg,dep,bundle)){free(direct);return false;}
+typedef struct LazyPlan {
+    bool *calls;        /* caller * function_count + callee */
+    size_t *offsets;    /* owner -> interval in indices */
+    size_t *indices;    /* one index per function-owned definition */
+} LazyPlan;
+
+static void lazy_plan_dispose(LazyPlan *plan) {
+    free(plan->calls); free(plan->offsets); free(plan->indices);
+    memset(plan, 0, sizeof(*plan));
+}
+
+static bool lazy_plan_build(Codegen *cg, LazyPlan *plan) {
+    const size_t n = cg->function_count;
+    if(n && n > (size_t)-1 / n) return false;
+    plan->calls = (bool*)calloc(n ? n * n : 1u, sizeof(bool));
+    plan->offsets = (size_t*)calloc(n + 1u, sizeof(size_t));
+    plan->indices = (size_t*)malloc((cg->defs.len ? cg->defs.len : 1u) * sizeof(size_t));
+    if(!plan->calls || !plan->offsets || !plan->indices) return false;
+    for(size_t fi = 0; fi < n; ++fi) {
+        lazy_scan_direct_calls(cg, cg->functions[fi].ast->body, plan->calls + fi * n);
+        cg->functions[fi].eager = cg->functions[fi].ast->resident;
     }
-    free(direct);
+    // A resident renderer cannot safely call a lazy helper after its clear.
+    // Propagate only explicit resident roots, NOT main(), which would defeat
+    // mandatory demand loading for the whole program.
+    bool changed;
+    do {
+        changed = false;
+        for(size_t fi = 0; fi < n; ++fi) if(cg->functions[fi].eager) {
+            for(size_t dep = 0; dep < n; ++dep) {
+                if(plan->calls[fi * n + dep] && !cg->functions[dep].eager) {
+                    cg->functions[dep].eager = true; changed = true;
+                }
+            }
+        }
+    } while(changed);
+    for(size_t i = 0; i < cg->defs.len; ++i) {
+        const int owner = cg->defs.items[i].owner;
+        if(owner >= 0 && (size_t)owner < n) ++plan->offsets[(size_t)owner + 1u];
+    }
+    for(size_t fi = 0; fi < n; ++fi) plan->offsets[fi + 1u] += plan->offsets[fi];
+    size_t *next = (size_t*)malloc((n ? n : 1u) * sizeof(size_t));
+    if(!next) return false;
+    memcpy(next, plan->offsets, n * sizeof(size_t));
+    for(size_t i = 0; i < cg->defs.len; ++i) {
+        const int owner = cg->defs.items[i].owner;
+        if(owner >= 0 && (size_t)owner < n) plan->indices[next[(size_t)owner]++] = i;
+    }
+    free(next);
     return true;
 }
 
-static bool write_lazy_module(Codegen *cg,size_t fi){
-    if(fi>=cg->function_count||function_is_eager(&cg->functions[fi]))return true;
-    bool *bundle=(bool*)calloc(cg->function_count,sizeof(*bundle));if(!bundle)return false;
-    if(!lazy_bundle_mark(cg,fi,bundle)){free(bundle);return false;}
-    size_t count=0;for(size_t i=0;i<cg->defs.len;++i){int owner=cg->defs.items[i].owner;if(owner>=0&&(size_t)owner<cg->function_count&&bundle[(size_t)owner])count++;}
-    if(!count){free(bundle);scmd_error_at(cg->source_path,1,1,"internal error: lazy function '%s' has no generated aliases",cg->functions[fi].ast->name);cg->errors++;return false;}
-    size_t *idx=(size_t*)malloc(count*sizeof(*idx));if(!idx){free(bundle);return false;}size_t n=0;for(size_t i=0;i<cg->defs.len;++i){int owner=cg->defs.items[i].owner;if(owner>=0&&(size_t)owner<cg->function_count&&bundle[(size_t)owner])idx[n++]=i;}
-    size_t reserve=256,bl=cg->options.page_bytes>reserve?cg->options.page_bytes-reserve:cg->options.page_bytes,cl=cg->options.page_commands>1?cg->options.page_commands-1:1;
-    size_t *st=NULL,*en=NULL,np=0,pos=0;while(pos<count){size_t start=pos,bytes=0,cmd=0;while(pos<count){size_t lb=alias_line_bytes(&cg->defs.items[idx[pos]]);if(cmd&&(cmd+1>cl||bytes+lb>bl))break;bytes+=lb;cmd++;pos++;}st=(size_t*)realloc(st,(np+1u)*sizeof(*st));en=(size_t*)realloc(en,(np+1u)*sizeof(*en));if(!st||!en){free(bundle);free(idx);free(st);free(en);return false;}st[np]=start;en[np]=pos;np++;}
-    char *legacy_entry=lazy_entry_path(cg,fi);if(legacy_entry){remove(legacy_entry);free(legacy_entry);}
-    size_t bundled=0;for(size_t dep=0;dep<cg->function_count;++dep)if(bundle[dep])bundled++;
-    for(size_t p=0;p<np;++p){char *path=lazy_page_path(cg,fi,p);FILE *f=path?fopen(path,"wb"):NULL;if(!f){free(path);free(bundle);free(idx);free(st);free(en);return false;}fprintf(f,"// scmdc lazy function %zu page %zu/%zu; bundled functions=%zu\n",fi,p+1,np,bundled);for(size_t k=st[p];k<en[p];++k){AliasDef *d=&cg->defs.items[idx[k]];fprintf(f,"alias %s \"%s\"\n",d->name,d->body);}if(p+1<np){char *next=lazy_page_ref(cg,fi,p+1);fprintf(f,"exec %s\n",next);free(next);}else fprintf(f,"%s\n",cg->functions[fi].entry_alias);fclose(f);free(path);}
-    remove_stale_lazy_pages(cg,fi,np);free(bundle);free(idx);free(st);free(en);return true;
+static bool lazy_preloads(Codegen *cg, const LazyPlan *plan, size_t fi, size_t dep) {
+    return dep != fi && plan->calls[fi * cg->function_count + dep] &&
+           !function_is_eager(&cg->functions[dep]) &&
+           !cg->functions[dep].ast->exported && cg->functions[dep].local_count == 0;
 }
-static bool write_lazy_modules(Codegen *cg){for(size_t fi=0;fi<cg->function_count;++fi)if(!write_lazy_module(cg,fi))return false;return true;}
+
+static bool lazy_push_owned_line(TextVec *lines, char *line) {
+    if(!line) return false;
+    const bool ok = textvec_push(lines, line);
+    free(line);
+    return ok;
+}
+
+static bool write_lazy_module(Codegen *cg, const LazyPlan *plan, size_t fi, FILE *map) {
+    CGFunction *fn = &cg->functions[fi];
+    const size_t count = plan->offsets[fi + 1u] - plan->offsets[fi];
+    if(function_is_eager(fn)) {
+        // Standalone compiles may switch a former lazy function to resident.
+        remove_stale_lazy_pages(cg, fi, 0);
+        fprintf(map, "%zu\teager\t%zu\t0\t%s\t-\n", fi, count, fn->ast->name);
+        return true;
+    }
+    if(!count) {
+        scmd_error_at(cg->source_path,1,1,"internal error: lazy function '%s' has no generated aliases",fn->ast->name);
+        cg->errors++; return false;
+    }
+    TextVec lines = {0};
+    bool ok = false;
+    for(size_t k = plan->offsets[fi]; k < plan->offsets[fi + 1u]; ++k) {
+        const AliasDef *def = &cg->defs.items[plan->indices[k]];
+        if(!lazy_push_owned_line(&lines, scmd_format("alias %s \"%s\"", def->name, def->body))) goto cleanup;
+    }
+    for(size_t dep = 0; dep < cg->function_count; ++dep) {
+        if(lazy_preloads(cg, plan, fi, dep) &&
+           !lazy_push_owned_line(&lines, scmd_format("__scmd_load%zu", dep))) goto cleanup;
+    }
+    // Only a completely executed loader marks itself loaded. The entry stub
+    // invokes the function separately after exec (and all preloads) returns.
+    if(!lazy_push_owned_line(&lines, scmd_format("alias __scmd_load%zu __scmd_halt", fi))) goto cleanup;
+    {
+        const size_t reserve = 256u;
+        const size_t byte_limit = cg->options.page_bytes > reserve ? cg->options.page_bytes - reserve : cg->options.page_bytes;
+        const size_t command_limit = cg->options.page_commands > 1u ? cg->options.page_commands - 1u : 1u;
+        size_t pos = 0, page = 0;
+        while(pos < lines.len) {
+            size_t start = pos, bytes = 0;
+            while(pos < lines.len) {
+                const size_t len = strlen(lines.items[pos]);
+                if(len > SCMD_CS2_MAX_COMMAND_BYTES) {
+                    scmd_error_at(cg->source_path,1,1,"lazy loader command is %zu bytes; CS2 limit is %u",len,(unsigned)SCMD_CS2_MAX_COMMAND_BYTES);
+                    cg->errors++; goto cleanup;
+                }
+                if(pos > start && (pos - start >= command_limit || bytes + len + 1u > byte_limit)) break;
+                bytes += len + 1u; ++pos;
+            }
+            char *path = lazy_page_path(cg, fi, page);
+            FILE *file = path ? fopen(path, "wb") : NULL;
+            free(path);
+            if(!file) goto cleanup;
+            fprintf(file, "// scmdc load-once function %zu page %zu: %s\n", fi, page + 1u, fn->ast->name);
+            for(size_t k = start; k < pos; ++k) fprintf(file, "%s\n", lines.items[k]);
+            if(pos < lines.len) {
+                char *next = lazy_page_ref(cg, fi, page + 1u);
+                if(!next || strlen(next) + 5u > SCMD_CS2_MAX_COMMAND_BYTES) {
+                    free(next); fclose(file); goto cleanup;
+                }
+                fprintf(file, "exec %s\n", next); free(next);
+            }
+            const bool write_error = ferror(file) != 0;
+            if(fclose(file) != 0 || write_error) goto cleanup;
+            ++page;
+        }
+        remove_stale_lazy_pages(cg, fi, page);
+        char *legacy = lazy_entry_path(cg, fi);
+        if(legacy) { remove(legacy); free(legacy); }
+        fprintf(map, "%zu\tlazy\t%zu\t%zu\t%s\t", fi, count, page, fn->ast->name);
+        bool first = true;
+        for(size_t dep = 0; dep < cg->function_count; ++dep) if(lazy_preloads(cg, plan, fi, dep)) {
+            fprintf(map, "%s%zu", first ? "" : ",", dep); first = false;
+        }
+        fprintf(map, "%s\n", first ? "-" : "");
+        ok = true;
+    }
+cleanup:
+    for(size_t i = 0; i < lines.len; ++i) free(lines.items[i]);
+    free(lines.items);
+    return ok;
+}
+
+static bool write_lazy_modules(Codegen *cg) {
+    LazyPlan plan = {0};
+    if(!lazy_plan_build(cg, &plan)) { lazy_plan_dispose(&plan); return false; }
+    char *map_path = scmd_format("%s.loadmap.tsv", cg->output_path);
+    FILE *map = map_path ? fopen(map_path, "wb") : NULL;
+    free(map_path);
+    bool ok = map != NULL;
+    if(map) {
+        fprintf(map, "id\tstorage\taliases\tpages\tfunction\tpreloads\n");
+        for(size_t fi = 0; fi < cg->function_count && ok; ++fi) ok = write_lazy_module(cg, &plan, fi, map);
+        if(ferror(map)) ok = false;
+        if(fclose(map) != 0) ok = false;
+    }
+    lazy_plan_dispose(&plan);
+    return ok;
+}
 
 static bool build_core_defs(Codegen *cg,AliasVec *core){
     for(size_t i=0;i<cg->defs.len;++i){
@@ -1004,7 +1141,19 @@ static bool build_core_defs(Codegen *cg,AliasVec *core){
         bool eager=owner<0||(owner>=0&&(size_t)owner<cg->function_count&&function_is_eager(&cg->functions[(size_t)owner]));
         if(eager&&!aliasvec_push_copy(core,cg->defs.items[i].name,cg->defs.items[i].body,cg->defs.items[i].opaque,-1))return false;
     }
-    for(size_t fi=0;fi<cg->function_count;++fi){CGFunction *fn=&cg->functions[fi];if(function_is_eager(fn))continue;char *ref=lazy_entry_ref(cg,fi),*body=ref?scmd_format("exec %s",ref):NULL;if(!ref||!body||!aliasvec_push_copy(core,fn->entry_alias,body,true,-1)){free(ref);free(body);return false;}free(ref);free(body);}
+    for(size_t fi = 0; fi < cg->function_count; ++fi) {
+        CGFunction *fn = &cg->functions[fi];
+        if(function_is_eager(fn)) continue;
+        char *ref = lazy_entry_ref(cg, fi);
+        char *load_name = scmd_format("__scmd_load%zu", fi);
+        char *load_body = ref ? scmd_format("exec %s", ref) : NULL;
+        char *entry_body = load_name ? scmd_format("%s;%s", load_name, fn->entry_alias) : NULL;
+        const bool ok = ref && load_name && load_body && entry_body &&
+            aliasvec_push_copy(core, load_name, load_body, true, -1) &&
+            aliasvec_push_copy(core, fn->entry_alias, entry_body, true, -1);
+        free(ref); free(load_name); free(load_body); free(entry_body);
+        if(!ok) return false;
+    }
     return true;
 }
 static bool write_output(Codegen*cg){

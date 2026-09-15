@@ -1,0 +1,9 @@
+u8 count = 0;
+function shared() { count += 1; console.print("SHARED_BODY"); }
+function with_local() { u8 value = 9; shared(); if(value != 9) { console.print("LOCAL_FAIL"); } }
+export function caller_a() { shared(); }
+export function caller_b() { shared(); with_local(); }
+function leaf() { console.print("RESIDENT_LEAF"); }
+function middle() { leaf(); }
+export resident function draw() { console.clear(); console.print("FRAME_BEGIN"); middle(); console.print("FRAME_END"); }
+function main() { caller_a(); caller_b(); caller_a(); caller_b(); if(count != 6) { console.print("LOAD_RETURN_FAIL"); return; } draw(); console.print("LAZY_SHARED_PASS"); }

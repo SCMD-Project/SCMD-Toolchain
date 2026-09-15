@@ -16,7 +16,7 @@ if(NOT compile_rc EQUAL 0)
     message(FATAL_ERROR "compile failed (${compile_rc})\n${compile_out}\n${compile_err}")
 endif()
 execute_process(
-    COMMAND "${SCMDSIM}" "${OUTDIR}" --exec "${NAME}" --no-interactive --no-engine-messages --no-ansi --max-commands "${MAX_COMMANDS}"
+    COMMAND "${SCMDSIM}" "${OUTDIR}" --exec "${NAME}" --no-interactive --no-engine-messages --no-ansi --strict --max-commands "${MAX_COMMANDS}"
     RESULT_VARIABLE sim_rc
     OUTPUT_VARIABLE sim_out
     ERROR_VARIABLE sim_err
