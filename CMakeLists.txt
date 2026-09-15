@@ -757,6 +757,14 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME scmdsim_dis_meta
+        COMMAND ${CMAKE_COMMAND}
+                -DSCMDSIM=$<TARGET_FILE:scmdsim>
+                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/dis-meta-test
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_dis_meta.cmake
+    )
+
+    add_test(
         NAME scmd_comptime_arrays
         COMMAND ${CMAKE_COMMAND}
                 -DSCMD=$<TARGET_FILE:scmdc>
