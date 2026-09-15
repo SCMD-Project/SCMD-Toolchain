@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-integrity:
+    name: Source integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify simulator CFG fixtures are tracked
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f tests/sim/cfg/alias.cfg ]]; then
+            echo "::error::tests/sim/cfg fixtures are missing from the checkout"
+            exit 1
+          fi
+
+          if git check-ignore --no-index -q tests/sim/cfg/alias.cfg; then
+            echo "::error::tests/sim/cfg/*.cfg is still matched by .gitignore"
+            git check-ignore --no-index -v tests/sim/cfg/alias.cfg || true
+            exit 1
+          fi
+
+          tracked_cfgs="$(
+            git ls-files 'tests/sim/cfg/**' |
+              grep -cE '\.cfg$' || true
+          )"
+
+          if [[ "$tracked_cfgs" -lt 1 ]]; then
+            echo "::error::no simulator CFG fixtures are tracked by Git"
+            exit 1
+          fi
+
+          echo "Tracked simulator CFG fixtures: $tracked_cfgs"
+          git ls-files 'tests/sim/cfg/**' | grep -E '\.cfg$' | sort
+
+  release:
+    name: Release / ${{ matrix.os }}
+    needs: source-integrity
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Tool versions
+        shell: bash
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          cmake --version
+          clang --version
+          clang++ --version
+          ninja --version
+
+      - name: Tool versions
+        shell: pwsh
+        if: runner.os == 'Windows'
+        run: |
+          cmake --version
+          clang --version
+          clang++ --version
+          ninja --version
+
+      - name: Build and test Release
+        shell: bash
+        if: runner.os == 'Linux'
+        run: bash scripts/build.sh Release
+
+      - name: Build and test Release
+        shell: pwsh
+        if: runner.os == 'Windows'
+        run: ./scripts/build.ps1 -Config Release -Clean
+
+      - name: Upload release tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: scmd-tools-${{ runner.os }}-${{ github.sha }}
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  sanitize:
+    name: ASan + UBSan / Ubuntu
+    needs: source-integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --version
+          clang --version
+          clang++ --version
+          ninja --version
+
+      - name: Build and test with sanitizers
+        shell: bash
+        run: bash scripts/build.sh Sanitize
