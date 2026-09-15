@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cmath>
 #include <chrono>
+#include <thread>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -122,6 +123,19 @@ std::string utf8_from_wchars(const wchar_t *chars, int count) {
 }
 #endif
 
+#ifdef _WIN32
+/* Make UTF-8 output and ANSI escapes usable on the default Windows console,
+ * not only in Windows Terminal. Harmless when stdout is a pipe. */
+void init_windows_console() {
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (out != INVALID_HANDLE_VALUE && GetConsoleMode(out, &mode))
+        SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+}
+#endif
+
 void pop_utf8_codepoint(std::string &text) {
     if (text.empty()) return;
     size_t pos = text.size() - 1u;
@@ -160,6 +174,9 @@ public:
     }
 
     int run() {
+#ifdef _WIN32
+        init_windows_console();
+#endif
         if (options_.profile && *options_.profile && std::string_view(options_.profile) != SCMD_CS2_PROFILE) {
             std::cerr << "scmdsim: unsupported compatibility profile '" << options_.profile
                       << "' (supported: " << SCMD_CS2_PROFILE << ")\n";
@@ -811,7 +828,11 @@ private:
         while (!ready_.empty()) {
             auto stream = ready_.top();
             ready_.pop();
-            if (stream->ready_ms > now_ms_) now_ms_ = stream->ready_ms;
+            if (stream->ready_ms > now_ms_) {
+                if (options_.real_time)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(stream->ready_ms - now_ms_));
+                now_ms_ = stream->ready_ms;
+            }
             StepResult result = StepResult::Continue;
             while (result == StepResult::Continue) {
                 if (stream->stack.empty()) { result = StepResult::Finished; break; }
@@ -1098,9 +1119,6 @@ private:
     }
 
     void repl() {
-#ifdef _WIN32
-        SetConsoleOutputCP(CP_UTF8);
-#endif
         std::vector<std::string> history;
         std::cout << "scmdsim " << SCMD_VERSION << " [SCB" << scmd::bc::kAbiVersion << '/' << SCMD_CS2_PROFILE
                   << "]  Tab: complete  quit/exit: leave  :help: simulator commands\n";
