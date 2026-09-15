@@ -181,8 +181,18 @@ public:
         } else {
             std::error_code ec;
             source_root_ = fs::absolute(input_path_, ec);
+            /* Convenience: passing a single .cfg file uses its directory as the
+             * CFG root and executes the file itself on startup. */
+            if (!ec && fs::is_regular_file(source_root_) &&
+                lower_ascii(source_root_.extension().string()) == ".cfg") {
+                startup_file_module_ = lower_ascii(source_root_.stem().string());
+                source_root_ = source_root_.parent_path();
+            }
             if (ec || !fs::exists(source_root_) || !fs::is_directory(source_root_)) {
-                std::cerr << "scmdsim: cfg root does not exist: " << input_path_.string() << '\n';
+                if (!ec && fs::exists(source_root_))
+                    std::cerr << "scmdsim: cfg root is not a directory: " << input_path_.string() << '\n';
+                else
+                    std::cerr << "scmdsim: cfg root does not exist: " << input_path_.string() << '\n';
                 return 1;
             }
             source_mode_ = true;
@@ -211,6 +221,16 @@ public:
             std::cerr << "scmdsim: SCB profile mismatch: package='" << package_.profile
                       << "' simulator='" << SCMD_CS2_PROFILE << "'\n";
             return 1;
+        }
+        if (!startup_file_module_.empty()) {
+            const uint32_t block = resolve_module(startup_file_module_);
+            if (block == (std::numeric_limits<uint32_t>::max)()) {
+                std::cerr << "exec: couldn't exec '" << startup_file_module_ << "'\n";
+                return 1;
+            }
+            ++exec_calls_;
+            submit_block(block, false);
+            if (!drain()) return 1;
         }
         if (options_.startup_exec && *options_.startup_exec) {
             const std::string ref = options_.startup_exec;
@@ -242,6 +262,7 @@ private:
     Package package_;
     std::string package_source_;
     bool source_mode_ = false;
+    std::string startup_file_module_;
 
     struct SourceStamp {
         uintmax_t size = 0;
