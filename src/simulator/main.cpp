@@ -15,6 +15,8 @@ void usage(const char *argv0) {
               << "Usage:\n"
               << "  " << argv0 << " [cfg-root|package.scb] [options]\n\n"
               << "If the input is omitted, the current directory is opened lazily.\n"
+              << "A single .cfg file is also accepted: its directory becomes the CFG root\n"
+              << "and the file itself is executed on startup.\n\n"
               << "CFG modules compile on first exec and hot-reload when their source changes.\n\n"
               << "Options:\n"
               << "  --exec NAME             execute NAME.cfg before entering the console\n"
