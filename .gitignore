@@ -4,6 +4,7 @@ build/
 .idea/
 *.cfg
 !runtime/*.cfg
+!tests/**/*.cfg
 
 # User-facing build products
 dist/
