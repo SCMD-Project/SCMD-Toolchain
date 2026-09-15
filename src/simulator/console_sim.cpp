@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cmath>
 #include <chrono>
+#include <thread>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -122,6 +123,19 @@ std::string utf8_from_wchars(const wchar_t *chars, int count) {
 }
 #endif
 
+#ifdef _WIN32
+/* Make UTF-8 output and ANSI escapes usable on the default Windows console,
+ * not only in Windows Terminal. Harmless when stdout is a pipe. */
+void init_windows_console() {
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (out != INVALID_HANDLE_VALUE && GetConsoleMode(out, &mode))
+        SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+}
+#endif
+
 void pop_utf8_codepoint(std::string &text) {
     if (text.empty()) return;
     size_t pos = text.size() - 1u;
@@ -160,6 +174,9 @@ public:
     }
 
     int run() {
+#ifdef _WIN32
+        init_windows_console();
+#endif
         if (options_.profile && *options_.profile && std::string_view(options_.profile) != SCMD_CS2_PROFILE) {
             std::cerr << "scmdsim: unsupported compatibility profile '" << options_.profile
                       << "' (supported: " << SCMD_CS2_PROFILE << ")\n";
@@ -807,12 +824,27 @@ private:
         return StepResult::CommandBoundary;
     }
 
+    /* Advance the virtual clock to a stream's wake time, waiting for real
+     * when --real-time is requested. */
+    void advance_clock(Stream &stream) {
+        if (stream.ready_ms > now_ms_) {
+            if (options_.real_time)
+                std::this_thread::sleep_for(std::chrono::milliseconds(stream.ready_ms - now_ms_));
+            now_ms_ = stream.ready_ms;
+        }
+    }
+
     bool drain() {
         while (!ready_.empty()) {
             auto stream = ready_.top();
             ready_.pop();
-            if (stream->ready_ms > now_ms_) now_ms_ = stream->ready_ms;
+            if (stream->ready_ms > now_ms_) {
+                if (options_.real_time)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(stream->ready_ms - now_ms_));
+                now_ms_ = stream->ready_ms;
+            }
             StepResult result = StepResult::Continue;
+            for (;;) {
             while (result == StepResult::Continue) {
                 if (stream->stack.empty()) { result = StepResult::Finished; break; }
                 Frame &frame = stream->stack.back();
@@ -836,13 +868,29 @@ private:
                 result = execute_instruction(*stream, ins);
             }
             if (result == StepResult::Failed || failed_) return false;
-            if (result == StepResult::CommandBoundary || result == StepResult::Sleep) {
-                if (++commands_executed_ > max_commands_) {
-                    std::cerr << "scmdsim: command budget exceeded (" << max_commands_ << "); probable alias/exec loop\n";
-                    failed_ = true;
-                    return false;
-                }
-                if (!stream->stack.empty()) ready_.push(std::move(stream));
+            if (result != StepResult::CommandBoundary && result != StepResult::Sleep) break;  // Finished
+            if (++commands_executed_ > max_commands_) {
+                std::cerr << "scmdsim: command budget exceeded (" << max_commands_ << "); probable alias/exec loop\n";
+                failed_ = true;
+                return false;
+            }
+            if (stream->stack.empty()) break;  // stream finished at a command boundary
+
+            /* Fast path: while this stream is still the queue head, run the
+             * next command in place instead of paying a priority-queue round
+             * trip. ready_ms never moves backwards, sleeps only move it
+             * forward, and this stream has the lowest id of anything submitted
+             * while it was running, so requeue+pop would immediately hand
+             * control straight back to it. Emulating that pop (clock advance
+             * included) keeps virtual time, ordering, and the command budget
+             * bit-for-bit identical. */
+            if (ready_.empty() || stream->ready_ms <= ready_.top()->ready_ms) {
+                advance_clock(*stream);
+                result = StepResult::Continue;
+                continue;
+            }
+            ready_.push(std::move(stream));
+            break;
             }
         }
         /* snd_opvar_set SetOnSpawn changes are observed one entity/SOS update
@@ -922,6 +970,122 @@ private:
         if (items.size() > limit) std::cout << "... " << (items.size() - limit) << " more\n";
     }
 
+    static const char *bc_op_name(Op op) {
+        switch (op) {
+        case Op::Nop: return "nop";
+        case Op::KStr: return "kstr";
+        case Op::KImm: return "kimm";
+        case Op::AliasList: return "alias_list";
+        case Op::AliasQuery: return "alias_query";
+        case Op::AliasSet: return "alias_set";
+        case Op::AliasQueryI: return "alias_query_i";
+        case Op::AliasSetI: return "alias_set_i";
+        case Op::Exec: return "exec";
+        case Op::ExecIfExists: return "exec_if_exists";
+        case Op::ExecAsync: return "exec_async";
+        case Op::ExecI: return "exec_i";
+        case Op::ExecIfExistsI: return "exec_if_exists_i";
+        case Op::ExecAsyncI: return "exec_async_i";
+        case Op::Sleep: return "sleep";
+        case Op::SleepI: return "sleep_i";
+        case Op::Clear: return "clear";
+        case Op::Echo: return "echo";
+        case Op::EchoLn: return "echoln";
+        case Op::Say: return "say";
+        case Op::SayTeam: return "say_team";
+        case Op::EchoI: return "echo_i";
+        case Op::EchoLnI: return "echoln_i";
+        case Op::SayI: return "say_i";
+        case Op::SayTeamI: return "say_team_i";
+        case Op::SetInfo: return "setinfo";
+        case Op::SetInfoI: return "setinfo_i";
+        case Op::IncrementVar: return "incrementvar";
+        case Op::MultVar: return "multvar";
+        case Op::Toggle: return "toggle";
+        case Op::Dispatch: return "dispatch";
+        case Op::Dispatch0: return "dispatch0";
+        case Op::Dispatch1: return "dispatch1";
+        case Op::DispatchRaw: return "dispatch_raw";
+        case Op::Ret: return "ret";
+        }
+        return "op?";
+    }
+
+    /* Disassemble one compiled block: module name or alias name. */
+    void disassemble_block(uint32_t block_id) {
+        const Block &b = package_.blocks[block_id];
+        std::cout << "block " << block_id;
+        if (b.name_sid != scmd::bc::kNoString) std::cout << " '" << package_.str(b.name_sid) << "'";
+        std::cout << " (" << b.count << " instructions)\n";
+        for (uint32_t i = 0; i < b.count; ++i) {
+            const Instruction &ins = package_.code[b.first + i];
+            const Op op = static_cast<Op>(ins.op);
+            std::cout << "  " << std::setw(4) << i << "  " << bc_op_name(op);
+            switch (op) {
+            case Op::KStr:
+                std::cout << " r" << static_cast<unsigned>(ins.dst) << " = \"" << package_.str(ins.x) << "\"";
+                break;
+            case Op::KImm:
+                std::cout << " r" << static_cast<unsigned>(ins.dst) << " = "
+                          << (static_cast<uint64_t>(ins.x) | (static_cast<uint64_t>(ins.y) << 32u));
+                break;
+            case Op::AliasQuery: case Op::AliasSet:
+                std::cout << " r" << static_cast<unsigned>(ins.a);
+                break;
+            case Op::AliasQueryI:
+                std::cout << " '" << package_.str(ins.x) << "'";
+                break;
+            case Op::AliasSetI:
+                std::cout << " '" << package_.str(ins.x) << "' -> block " << ins.y;
+                break;
+            case Op::Exec: case Op::ExecIfExists: case Op::ExecAsync:
+                std::cout << " r" << static_cast<unsigned>(ins.a);
+                break;
+            case Op::ExecI: case Op::ExecIfExistsI: case Op::ExecAsyncI:
+                std::cout << " '" << package_.str(ins.x) << "'";
+                break;
+            case Op::Sleep:
+                std::cout << " r" << static_cast<unsigned>(ins.a);
+                break;
+            case Op::SleepI:
+                std::cout << " " << (static_cast<uint64_t>(ins.x) | (static_cast<uint64_t>(ins.y) << 32u)) << "ms";
+                break;
+            case Op::Echo: case Op::EchoLn: case Op::Say: case Op::SayTeam:
+                std::cout << " r" << static_cast<unsigned>(ins.a);
+                break;
+            case Op::EchoI: case Op::EchoLnI: case Op::SayI: case Op::SayTeamI:
+                std::cout << " \"" << package_.str(ins.x) << "\"";
+                break;
+            case Op::SetInfo:
+                std::cout << " r" << static_cast<unsigned>(ins.a) << ", r" << static_cast<unsigned>(ins.b);
+                break;
+            case Op::SetInfoI:
+                std::cout << " '" << package_.str(ins.x) << "' = \"" << package_.str(ins.y) << "\"";
+                break;
+            case Op::IncrementVar: case Op::MultVar:
+                std::cout << " r" << static_cast<unsigned>(ins.a) << "..r" << static_cast<unsigned>(ins.a + 3u);
+                break;
+            case Op::Toggle:
+                std::cout << " r" << static_cast<unsigned>(ins.a) << " x" << static_cast<unsigned>(ins.b);
+                break;
+            case Op::Dispatch:
+                std::cout << " " << static_cast<unsigned>(ins.b) << " arg(s) @ r" << static_cast<unsigned>(ins.a);
+                break;
+            case Op::Dispatch0:
+                std::cout << " '" << package_.str(ins.x) << "'";
+                break;
+            case Op::Dispatch1:
+                std::cout << " '" << package_.str(ins.x) << "' '" << package_.str(ins.y) << "'";
+                break;
+            case Op::DispatchRaw:
+                std::cout << " \"" << package_.str(ins.x) << "\"";
+                break;
+            default: break;
+            }
+            std::cout << "\n";
+        }
+    }
+
     bool handle_meta(const std::string &line) {
         if (line.empty() || line[0] != ':') return false;
         const auto argv = tokenize(line.substr(1));
@@ -966,6 +1130,22 @@ private:
         } else if (cmd == "cache") {
             std::cout << "cache=" << (options_.use_cache ? cache_root_.string() : std::string("OFF"))
                       << " hits=" << cache_hits_ << " misses=" << cache_misses_ << '\n';
+        } else if (cmd == "dis") {
+            if (argv.size() < 2u) {
+                std::cout << "dis: usage :dis <module|alias>\n";
+                return true;
+            }
+            const std::string ref = argv[1];
+            uint32_t block = resolve_module(ref);
+            if (block == (std::numeric_limits<uint32_t>::max)()) {
+                const auto alias = aliases_.find(lower_ascii(ref));
+                if (alias != aliases_.end()) block = alias->second.block;
+            }
+            if (block == (std::numeric_limits<uint32_t>::max)()) {
+                std::cout << "dis: unknown module or alias '" << ref << "'\n";
+                return true;
+            }
+            disassemble_block(block);
         } else if (cmd == "screen") {
             size_t n = 24u;
             if (argv.size() > 1u) {
@@ -1098,9 +1278,6 @@ private:
     }
 
     void repl() {
-#ifdef _WIN32
-        SetConsoleOutputCP(CP_UTF8);
-#endif
         std::vector<std::string> history;
         std::cout << "scmdsim " << SCMD_VERSION << " [SCB" << scmd::bc::kAbiVersion << '/' << SCMD_CS2_PROFILE
                   << "]  Tab: complete  quit/exit: leave  :help: simulator commands\n";

@@ -526,6 +526,20 @@ if(BUILD_TESTING)
         PASS_REGULAR_EXPRESSION "ROOT_A\nROOT_B\nFAST\nSLOW"
     )
 
+    # --real-time must not change stream ordering, only make the virtual
+    # clock wait for wall time during interactive demos.
+    add_test(
+        NAME sim_realtime_flag_preserves_order
+        COMMAND $<TARGET_FILE:scmdsim>
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/sim/cfg
+                --exec async_order
+                --real-time
+                --no-interactive --no-engine-messages --no-ansi
+    )
+    set_tests_properties(sim_realtime_flag_preserves_order PROPERTIES
+        PASS_REGULAR_EXPRESSION "ROOT_A\nROOT_B\nFAST\nSLOW"
+    )
+
     add_test(
         NAME sim_path_traversal_rejected
         COMMAND $<TARGET_FILE:scmdsim>
@@ -740,6 +754,14 @@ if(BUILD_TESTING)
                 -DSCMDSIM=$<TARGET_FILE:scmdsim>
                 -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/lazy-cache-test
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lazy_cache.cmake
+    )
+
+    add_test(
+        NAME scmdsim_dis_meta
+        COMMAND ${CMAKE_COMMAND}
+                -DSCMDSIM=$<TARGET_FILE:scmdsim>
+                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/dis-meta-test
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_dis_meta.cmake
     )
 
     add_test(
