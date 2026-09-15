@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cmath>
 #include <chrono>
+#include <thread>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -122,6 +123,19 @@ std::string utf8_from_wchars(const wchar_t *chars, int count) {
 }
 #endif
 
+#ifdef _WIN32
+/* Make UTF-8 output and ANSI escapes usable on the default Windows console,
+ * not only in Windows Terminal. Harmless when stdout is a pipe. */
+void init_windows_console() {
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (out != INVALID_HANDLE_VALUE && GetConsoleMode(out, &mode))
+        SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+}
+#endif
+
 void pop_utf8_codepoint(std::string &text) {
     if (text.empty()) return;
     size_t pos = text.size() - 1u;
@@ -160,6 +174,9 @@ public:
     }
 
     int run() {
+#ifdef _WIN32
+        init_windows_console();
+#endif
         if (options_.profile && *options_.profile && std::string_view(options_.profile) != SCMD_CS2_PROFILE) {
             std::cerr << "scmdsim: unsupported compatibility profile '" << options_.profile
                       << "' (supported: " << SCMD_CS2_PROFILE << ")\n";
@@ -807,12 +824,27 @@ private:
         return StepResult::CommandBoundary;
     }
 
+    /* Advance the virtual clock to a stream's wake time, waiting for real
+     * when --real-time is requested. */
+    void advance_clock(Stream &stream) {
+        if (stream.ready_ms > now_ms_) {
+            if (options_.real_time)
+                std::this_thread::sleep_for(std::chrono::milliseconds(stream.ready_ms - now_ms_));
+            now_ms_ = stream.ready_ms;
+        }
+    }
+
     bool drain() {
         while (!ready_.empty()) {
             auto stream = ready_.top();
             ready_.pop();
-            if (stream->ready_ms > now_ms_) now_ms_ = stream->ready_ms;
+            if (stream->ready_ms > now_ms_) {
+                if (options_.real_time)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(stream->ready_ms - now_ms_));
+                now_ms_ = stream->ready_ms;
+            }
             StepResult result = StepResult::Continue;
+            for (;;) {
             while (result == StepResult::Continue) {
                 if (stream->stack.empty()) { result = StepResult::Finished; break; }
                 Frame &frame = stream->stack.back();
@@ -836,13 +868,29 @@ private:
                 result = execute_instruction(*stream, ins);
             }
             if (result == StepResult::Failed || failed_) return false;
-            if (result == StepResult::CommandBoundary || result == StepResult::Sleep) {
-                if (++commands_executed_ > max_commands_) {
-                    std::cerr << "scmdsim: command budget exceeded (" << max_commands_ << "); probable alias/exec loop\n";
-                    failed_ = true;
-                    return false;
-                }
-                if (!stream->stack.empty()) ready_.push(std::move(stream));
+            if (result != StepResult::CommandBoundary && result != StepResult::Sleep) break;  // Finished
+            if (++commands_executed_ > max_commands_) {
+                std::cerr << "scmdsim: command budget exceeded (" << max_commands_ << "); probable alias/exec loop\n";
+                failed_ = true;
+                return false;
+            }
+            if (stream->stack.empty()) break;  // stream finished at a command boundary
+
+            /* Fast path: while this stream is still the queue head, run the
+             * next command in place instead of paying a priority-queue round
+             * trip. ready_ms never moves backwards, sleeps only move it
+             * forward, and this stream has the lowest id of anything submitted
+             * while it was running, so requeue+pop would immediately hand
+             * control straight back to it. Emulating that pop (clock advance
+             * included) keeps virtual time, ordering, and the command budget
+             * bit-for-bit identical. */
+            if (ready_.empty() || stream->ready_ms <= ready_.top()->ready_ms) {
+                advance_clock(*stream);
+                result = StepResult::Continue;
+                continue;
+            }
+            ready_.push(std::move(stream));
+            break;
             }
         }
         /* snd_opvar_set SetOnSpawn changes are observed one entity/SOS update
@@ -1098,9 +1146,6 @@ private:
     }
 
     void repl() {
-#ifdef _WIN32
-        SetConsoleOutputCP(CP_UTF8);
-#endif
         std::vector<std::string> history;
         std::cout << "scmdsim " << SCMD_VERSION << " [SCB" << scmd::bc::kAbiVersion << '/' << SCMD_CS2_PROFILE
                   << "]  Tab: complete  quit/exit: leave  :help: simulator commands\n";
