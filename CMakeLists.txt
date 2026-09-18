@@ -814,6 +814,10 @@ if(BUILD_TESTING)
         COMMAND ${CMAKE_COMMAND} -DSCMDSIM=$<TARGET_FILE:scmdsim>
             -DOUTDIR=${CMAKE_CURRENT_BINARY_DIR}/sim-fidelity
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_sim_fidelity.cmake)
+    add_test(NAME scmdsim_single_cfg_input
+        COMMAND ${CMAKE_COMMAND} -DSCMDSIM=$<TARGET_FILE:scmdsim>
+            -DOUTDIR=${CMAKE_CURRENT_BINARY_DIR}/sim-single-cfg
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_sim_single_file.cmake)
 endif()
 
 if(BUILD_TESTING)

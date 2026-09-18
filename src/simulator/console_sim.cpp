@@ -172,7 +172,17 @@ public:
         std::string error;
         const auto begin = std::chrono::steady_clock::now();
 
+        std::error_code input_ec;
+        if (!fs::exists(input_path_, input_ec) || input_ec) {
+            std::cerr << "scmdsim: cfg root does not exist: " << input_path_.string() << '\n';
+            return 1;
+        }
+
         if (is_scb) {
+            if (!fs::is_regular_file(input_path_, input_ec) || input_ec) {
+                std::cerr << "scmdsim: cfg root is not a directory: " << input_path_.string() << '\n';
+                return 1;
+            }
             if (!package_.load(input_path_, error)) {
                 std::cerr << "scmdsim: " << error << '\n';
                 return 1;
@@ -180,9 +190,21 @@ public:
             package_source_ = "scb";
         } else {
             std::error_code ec;
-            source_root_ = fs::absolute(input_path_, ec);
-            if (ec || !fs::exists(source_root_) || !fs::is_directory(source_root_)) {
+            input_path_ = fs::absolute(input_path_, ec);
+            if (ec) {
                 std::cerr << "scmdsim: cfg root does not exist: " << input_path_.string() << '\n';
+                return 1;
+            }
+            if (fs::is_directory(input_path_, ec) && !ec) {
+                source_root_ = input_path_;
+            } else if (fs::is_regular_file(input_path_, ec) && !ec &&
+                       lower_ascii(input_path_.extension().string()) == ".cfg") {
+                source_root_ = input_path_.parent_path();
+                std::string module = input_path_.filename().generic_string();
+                module.resize(module.size() - 4u);
+                startup_file_module_ = std::move(module);
+            } else {
+                std::cerr << "scmdsim: cfg root is not a directory: " << input_path_.string() << '\n';
                 return 1;
             }
             source_mode_ = true;
@@ -212,8 +234,10 @@ public:
                       << "' simulator='" << SCMD_CS2_PROFILE << "'\n";
             return 1;
         }
-        if (options_.startup_exec && *options_.startup_exec) {
-            const std::string ref = options_.startup_exec;
+        std::optional<std::string> startup_ref = startup_file_module_;
+        if (!startup_ref && options_.startup_exec && *options_.startup_exec) startup_ref = options_.startup_exec;
+        if (startup_ref) {
+            const std::string &ref = *startup_ref;
             if (!safe_exec_ref(ref)) {
                 std::cerr << "exec: invalid cfg path '" << ref << "'\n";
                 return 1;
@@ -239,6 +263,7 @@ private:
     fs::path input_path_;
     fs::path source_root_;
     fs::path cache_root_;
+    std::optional<std::string> startup_file_module_;
     Package package_;
     std::string package_source_;
     bool source_mode_ = false;
@@ -321,7 +346,7 @@ private:
         if (rel.empty() || rel == ".") return false;
         display = rel.generic_string();
         path = source_root_ / rel;
-        path.replace_extension(".cfg");
+        path += ".cfg";
         std::error_code ec;
         if (fs::is_regular_file(path, ec) && !ec) return true;
 
@@ -331,7 +356,7 @@ private:
         for (const std::string &name : source_module_names()) {
             if (scmd::bc::normalize_exec_ref(name) != wanted) continue;
             fs::path actual = source_root_ / fs::path(name);
-            actual.replace_extension(".cfg");
+            actual += ".cfg";
             if (fs::is_regular_file(actual, ec) && !ec) {
                 path = actual;
                 display = name;
@@ -357,8 +382,11 @@ private:
             if (lower_ascii(it->path().extension().string()) != ".cfg") continue;
             fs::path rel = fs::relative(it->path(), source_root_, ec);
             if (ec) { ec.clear(); continue; }
-            rel.replace_extension();
-            names.push_back(rel.generic_string());
+            std::string name = rel.generic_string();
+            if (name.size() >= 4u && lower_ascii(name.substr(name.size() - 4u)) == ".cfg") {
+                name.resize(name.size() - 4u);
+                names.push_back(std::move(name));
+            }
         }
         std::sort(names.begin(), names.end());
         names.erase(std::unique(names.begin(), names.end(), [](const std::string &a, const std::string &b) {

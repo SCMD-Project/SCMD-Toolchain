@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 typedef struct ScmdSimOptions {
-    /* A CFG root directory or a precompiled .scb package. NULL/empty means '.'. */
+    /* A CFG root directory, a single .cfg source file, or a precompiled .scb package. NULL/empty means '.'. */
     const char *cfg_root;
     const char *startup_exec;
     const char *script_path;
