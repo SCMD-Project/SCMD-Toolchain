@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build and test Release
+        shell: bash
+        if: runner.os == 'Linux'
+        run: bash scripts/build.sh Release
+
+      - name: Build and test Release
+        shell: pwsh
+        if: runner.os == 'Windows'
+        run: ./scripts/build.ps1 -Config Release -Clean
+
+      - name: Examples smoke
+        shell: bash
+        run: bash scripts/examples_smoke.sh dist/release
+
+      - name: Package dist/release
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $os = if ($IsWindows) { 'windows' } else { 'linux' }
+          $zip = Join-Path $env:RUNNER_TEMP ("scmd-toolchain-{0}-{1}.zip" -f $env:TAG, $os)
+          if (Test-Path $zip) { Remove-Item -Force $zip }
+          Compress-Archive -Path 'dist/release/*' -DestinationPath $zip
+          Write-Host "packaged: $zip"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "zip=$zip"
+        id: package
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-zip-${{ runner.os }}
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download release zips
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-zip-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" dist/* \
+            --title "SCMD Toolchain $TAG" \
+            --generate-notes \
+            --verify-tag

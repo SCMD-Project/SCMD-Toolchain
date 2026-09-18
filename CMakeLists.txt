@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(scmdc VERSION 0.12.0 LANGUAGES C CXX)
+project(scmdc VERSION 0.13.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)

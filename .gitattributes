@@ -1,0 +1,2 @@
+# bash scripts must stay LF or they break under git-bash/CI
+*.sh text eol=lf
