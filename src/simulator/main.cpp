@@ -32,6 +32,7 @@ void usage(const char *argv0) {
               << "  --strict                fail on modeled command/alias/exec errors\n"
               << "  --echo-delay-ms N       delay echo (not echoln), virtual stress only\n"
               << "  --exec-latency-ms N     add virtual latency to every exec, stress only\n"
+              << "  --real-time             pace virtual-time advances against wall time\n"
               << "  --profile " << SCMD_CS2_PROFILE << "    select the modeled compatibility profile\n"
               << "  --help                  show this help\n"
               << "  --version               print version\n\n"
@@ -73,6 +74,7 @@ int main(int argc, char **argv) {
     opts.ansi_clear = true;
     opts.engine_messages = true;
     opts.max_commands = 10000000ULL;
+    opts.real_time = false;
 
     bool input_seen = false;
     for (int i = 1; i < argc; ++i) {
@@ -117,6 +119,8 @@ int main(int argc, char **argv) {
             if (!parse_u64("--max-commands", argv[i], opts.max_commands) || opts.max_commands == 0) return 2;
         } else if (std::strcmp(arg, "--strict") == 0) {
             opts.strict = true;
+        } else if (std::strcmp(arg, "--real-time") == 0) {
+            opts.real_time = true;
         } else if (std::strcmp(arg, "--echo-delay-ms") == 0 || std::strcmp(arg, "--exec-latency-ms") == 0) {
             if (++i >= argc) { std::cerr << "error: " << arg << " requires a number\n"; return 2; }
             uint64_t &value = std::strcmp(arg, "--echo-delay-ms") == 0 ? opts.echo_delay_ms : opts.exec_latency_ms;

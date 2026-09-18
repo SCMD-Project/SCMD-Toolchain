@@ -22,6 +22,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -120,6 +121,63 @@ std::string utf8_from_wchars(const wchar_t *chars, int count) {
     if (written != needed) return {};
     return out;
 }
+
+class WindowsConsoleGuard {
+public:
+    explicit WindowsConsoleGuard(bool interactive) {
+        configure_output();
+        if (interactive) configure_input();
+    }
+
+    WindowsConsoleGuard(const WindowsConsoleGuard &) = delete;
+    WindowsConsoleGuard &operator=(const WindowsConsoleGuard &) = delete;
+
+    ~WindowsConsoleGuard() {
+        if (output_mode_changed_) SetConsoleMode(output_, output_mode_);
+        if (output_cp_changed_) SetConsoleOutputCP(output_cp_);
+        if (input_cp_changed_) SetConsoleCP(input_cp_);
+    }
+
+private:
+    HANDLE output_ = INVALID_HANDLE_VALUE;
+    DWORD output_mode_ = 0;
+    UINT output_cp_ = 0;
+    UINT input_cp_ = 0;
+    bool output_mode_changed_ = false;
+    bool output_cp_changed_ = false;
+    bool input_cp_changed_ = false;
+
+    static bool is_console_handle(HANDLE handle, DWORD &mode) {
+        return handle != nullptr && handle != INVALID_HANDLE_VALUE && GetConsoleMode(handle, &mode) != 0;
+    }
+
+    void configure_output() {
+        DWORD mode = 0;
+        const HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (!is_console_handle(handle, mode)) return;
+
+        output_ = handle;
+        output_mode_ = mode;
+        output_cp_ = GetConsoleOutputCP();
+        if (output_cp_ != 0 && output_cp_ != CP_UTF8) {
+            output_cp_changed_ = SetConsoleOutputCP(CP_UTF8) != 0;
+        }
+
+        const DWORD vt_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        if (vt_mode != mode) output_mode_changed_ = SetConsoleMode(output_, vt_mode) != 0;
+    }
+
+    void configure_input() {
+        DWORD mode = 0;
+        const HANDLE handle = GetStdHandle(STD_INPUT_HANDLE);
+        if (!is_console_handle(handle, mode)) return;
+
+        input_cp_ = GetConsoleCP();
+        if (input_cp_ != 0 && input_cp_ != CP_UTF8) {
+            input_cp_changed_ = SetConsoleCP(CP_UTF8) != 0;
+        }
+    }
+};
 #endif
 
 void pop_utf8_codepoint(std::string &text) {
@@ -160,6 +218,9 @@ public:
     }
 
     int run() {
+#ifdef _WIN32
+        WindowsConsoleGuard console_guard(options_.interactive);
+#endif
         if (options_.profile && *options_.profile && std::string_view(options_.profile) != SCMD_CS2_PROFILE) {
             std::cerr << "scmdsim: unsupported compatibility profile '" << options_.profile
                       << "' (supported: " << SCMD_CS2_PROFILE << ")\n";
@@ -587,6 +648,24 @@ private:
         return true;
     }
 
+    static void sleep_for_real_time(uint64_t remaining_ms) {
+        using Milliseconds = std::chrono::milliseconds;
+        using Rep = Milliseconds::rep;
+        const uint64_t max_chunk = static_cast<uint64_t>((std::numeric_limits<Rep>::max)());
+        while (remaining_ms != 0u) {
+            const uint64_t chunk = std::min(remaining_ms, max_chunk);
+            std::this_thread::sleep_for(Milliseconds(static_cast<Rep>(chunk)));
+            remaining_ms -= chunk;
+        }
+    }
+
+    void advance_clock(uint64_t target_ms) {
+        if (target_ms <= now_ms_) return;
+        const uint64_t delta = target_ms - now_ms_;
+        if (options_.real_time) sleep_for_real_time(delta);
+        now_ms_ = target_ms;
+    }
+
     const std::string &reg_string(const Stream &stream, uint8_t reg) const {
         const uint64_t raw = stream.regs[reg];
         if (raw >= package_.strings.size()) throw std::runtime_error("VM register contains invalid string id");
@@ -878,13 +957,13 @@ private:
             if (!delayed_lines_.empty() && (ready_.empty() || delayed_lines_.top().at < ready_.top()->ready_ms)) {
                 const DelayedLine line = delayed_lines_.top();
                 delayed_lines_.pop();
-                now_ms_ = std::max(now_ms_, line.at);
+                advance_clock(line.at);
                 screen_line(line.text);
                 continue;
             }
             auto stream = ready_.top();
             ready_.pop();
-            if (stream->ready_ms > now_ms_) now_ms_ = stream->ready_ms;
+            advance_clock(stream->ready_ms);
             StepResult result = StepResult::Continue;
             while (result == StepResult::Continue) {
                 if (stream->stack.empty()) { result = StepResult::Finished; break; }
@@ -1180,9 +1259,6 @@ private:
     }
 
     void repl() {
-#ifdef _WIN32
-        SetConsoleOutputCP(CP_UTF8);
-#endif
         std::vector<std::string> history;
         std::cout << "scmdsim " << SCMD_VERSION << " [SCB" << scmd::bc::kAbiVersion << '/' << SCMD_CS2_PROFILE
                   << "]  Tab: complete  quit/exit: leave  :help: simulator commands\n";

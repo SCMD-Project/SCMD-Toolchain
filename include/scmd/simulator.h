@@ -26,6 +26,8 @@ typedef struct ScmdSimOptions {
     /* Deterministic stress knobs, not measurements of real CS2 timings. */
     uint64_t echo_delay_ms;
     uint64_t exec_latency_ms;
+    /* Pace virtual-time advances against wall time. Disabled by default. */
+    bool real_time;
     bool strict; /* fail on unknown commands, missing execs and rejected aliases */
 } ScmdSimOptions;
 

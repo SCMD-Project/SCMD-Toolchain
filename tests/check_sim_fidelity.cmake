@@ -14,6 +14,15 @@ msg
 ]=] [=[C:\\temp\\notes\\n\\t]=] "" --strict)
 run_case(hidden "hideconsole;echoln HIDDEN_PRESERVED;showconsole\n:screen 2\n" "\\[screen\\]\nHIDDEN_PRESERVED" "" --strict)
 run_case(delay "echo DELAYED;clear;echoln IMMEDIATE\n:screen 4\n:time\n" "\\[screen\\]\nIMMEDIATE\n\\[Console\\] DELAYED\n7 ms" "" --strict --echo-delay-ms 7)
+file(WRITE "${OUTDIR}/realtime_delayed.cfg" "echo DELAYED_REALTIME\nsleep 40\necholn AFTER_REALTIME\n")
+execute_process(COMMAND "${SCMDSIM}" "${OUTDIR}" --exec realtime_delayed --real-time --echo-delay-ms 10
+    --no-interactive --no-engine-messages --no-ansi
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+string(FIND "${out}" "[Console] DELAYED_REALTIME" delayed_pos)
+string(FIND "${out}" "AFTER_REALTIME" after_pos)
+if(NOT rc EQUAL 0 OR delayed_pos EQUAL -1 OR after_pos EQUAL -1 OR after_pos LESS delayed_pos)
+    message(FATAL_ERROR "real-time delayed-event ordering failed: rc=${rc}\n${out}\n${err}")
+endif()
 file(WRITE "${OUTDIR}/leaf.cfg" "echoln CHILD\n")
 run_case(loads "exec leaf;exec leaf.cfg\n:loads\n:stats\n" "2\tleaf\n.*sim_time=6ms.*execs=2.*unique_execs=1" "" --strict --exec-latency-ms 3)
 string(REPEAT a 31 good)
