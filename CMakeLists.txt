@@ -532,6 +532,18 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME sim_realtime_flag_preserves_order
+        COMMAND $<TARGET_FILE:scmdsim>
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/sim/cfg
+                --exec async_order
+                --real-time
+                --no-interactive --no-engine-messages --no-ansi
+    )
+    set_tests_properties(sim_realtime_flag_preserves_order PROPERTIES
+        PASS_REGULAR_EXPRESSION "ROOT_A\nROOT_B\nFAST\nSLOW"
+    )
+
+    add_test(
         NAME sim_path_traversal_rejected
         COMMAND $<TARGET_FILE:scmdsim>
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/sim/cfg
