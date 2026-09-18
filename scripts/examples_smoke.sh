@@ -4,6 +4,8 @@
 set -euo pipefail
 
 DIST="${1:?usage: examples_smoke.sh <dist-dir-with-binaries>}"
+DIST="$(cd "$DIST" && pwd)"
+test -x "$DIST/scmdc" || { echo "error: $DIST/scmdc not found (build first)" >&2; exit 1; }
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -21,7 +23,7 @@ done
 for proj in "$ROOT"/examples/*/*.scmdproj; do
     [ -e "$proj" ] || continue
     echo "[smoke] compile project $(basename "$proj")"
-    (cd "$(dirname "$proj")" && "$DIST/scmdc" build "$(basename "$proj")" >/dev/null)
+    "$DIST/scmdc" build "$proj" >/dev/null
 done
 
 for name in "${names[@]}"; do
