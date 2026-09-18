@@ -1,0 +1,45 @@
+name: 'Setup SCMD toolchain'
+description: >
+  Download a SCMD-Toolchain GitHub Release zip and extract the binaries
+  (scmdc, scmdsim, vcs16scmd, ...). Downstream repos (AliasOS, SCMD2) pin a
+  release tag; empty input resolves the latest release.
+inputs:
+  toolchain-tag:
+    description: 'Release tag to download, e.g. v0.13.0. Empty = latest release.'
+    required: false
+    default: ''
+outputs:
+  toolchain-dir:
+    description: 'Directory containing the extracted binaries'
+    value: ${{ steps.download.outputs.dir }}
+  resolved-tag:
+    description: 'The release tag that was actually downloaded'
+    value: ${{ steps.download.outputs.tag }}
+runs:
+  using: composite
+  steps:
+    - id: download
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $tag = '${{ inputs.toolchain-tag }}'
+        if (-not $tag) {
+          $tag = (Invoke-RestMethod -Uri 'https://api.github.com/repos/SCMD-Project/SCMD-Toolchain/releases/latest').tag_name
+        }
+        if (-not ($tag -match '^v[0-9]')) { throw "unexpected tag: $tag" }
+        $os = if ($IsWindows) { 'windows' } elseif ($IsMacOS) { 'macos' } else { 'linux' }
+        $zip = Join-Path $env:RUNNER_TEMP ("scmd-toolchain-{0}-{1}.zip" -f $tag, $os)
+        $url = "https://github.com/SCMD-Project/SCMD-Toolchain/releases/download/$tag/scmd-toolchain-$tag-$os.zip"
+        Write-Host "downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $zip
+        $dir = Join-Path $env:RUNNER_TEMP 'scmd-toolchain'
+        if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+        Expand-Archive -Path $zip -DestinationPath $dir
+        if (-not $IsWindows) { & chmod +x (Join-Path $dir '*') }
+        foreach ($tool in 'scmdc', 'scmdsim', 'vcs16scmd') {
+          $exe = if ($IsWindows) { "$tool.exe" } else { $tool }
+          if (-not (Test-Path (Join-Path $dir $exe))) { throw "missing tool in release zip: $exe" }
+        }
+        Write-Host "toolchain $tag ready at $dir"
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "dir=$dir"
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag"

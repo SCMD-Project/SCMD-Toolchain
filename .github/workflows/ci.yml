@@ -103,6 +103,10 @@ jobs:
         if: runner.os == 'Windows'
         run: ./scripts/build.ps1 -Config Release -Clean
 
+      - name: Examples smoke
+        shell: bash
+        run: bash scripts/examples_smoke.sh dist/release
+
       - name: Upload release tools
         uses: actions/upload-artifact@v4
         with:
