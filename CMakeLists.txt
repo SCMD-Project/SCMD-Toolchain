@@ -151,6 +151,11 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(vcs16_c_api_test tests/vcs16/c_api.c)
     target_link_libraries(vcs16_c_api_test PRIVATE vcs16)
+    # libvcs16.a holds LTO bitcode in Release; the test must link with -flto
+    # or the system linker rejects the archive ("file format not recognized").
+    if(SCMD_IPO_SUPPORTED)
+        set_property(TARGET vcs16_c_api_test PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
     add_dependencies(scmd_tools vcs16_c_api_test)
     set_target_properties(vcs16_c_api_test PROPERTIES LINKER_LANGUAGE CXX)
     scmd_apply_warnings(vcs16_c_api_test)
