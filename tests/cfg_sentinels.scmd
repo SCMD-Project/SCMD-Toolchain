@@ -1,0 +1,20 @@
+bool hot = false;
+u8 count = 0;
+
+function main()
+{
+    hot = true;
+    if(hot)
+    {
+        hot = false;
+        count = count + 1;
+    }
+    if(count == 1 && !hot)
+    {
+        console.print("CFG_SENTINEL_PASS");
+    }
+    else
+    {
+        console.print("CFG_SENTINEL_FAIL");
+    }
+}

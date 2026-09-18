@@ -286,6 +286,16 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME scmd_cfg_sentinel_aliases
+        COMMAND ${CMAKE_COMMAND}
+                -DSCMDC=$<TARGET_FILE:scmdc>
+                -DSCMDSIM=$<TARGET_FILE:scmdsim>
+                -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/cfg_sentinels.scmd
+                -DOUTDIR=${CMAKE_CURRENT_BINARY_DIR}/cfg-sentinel-check
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_cfg_sentinels.cmake
+    )
+
+    add_test(
         NAME scmd_cs2_command_length
         COMMAND ${CMAKE_COMMAND}
                 -DSCMDC=$<TARGET_FILE:scmdc>
